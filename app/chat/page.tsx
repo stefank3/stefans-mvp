@@ -39,6 +39,14 @@ type ChatItem =
   | { kind: "review"; role: "bot"; review: ReviewResult }
   | { kind: "error"; role: "bot"; title: string; details: string };
 
+type PersistedState = {
+  mode: Mode;
+  items: ChatItem[];
+  input: string;
+};
+//local storage key
+const STORAGE_KEY = "stefans-mvp-chat-v1";
+
 /** Clamp helper to keep UI stable even if model returns values out of expected range. */
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
@@ -365,6 +373,34 @@ export default function ChatPage() {
   const [items, setItems] = useState<ChatItem[]>([]);
   const [isSending, setIsSending] = useState(false);
 
+// Load persisted chat state on first render
+useEffect(() => {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+
+    const parsed = JSON.parse(raw) as PersistedState;
+
+    if (parsed?.mode) setMode(parsed.mode);
+    if (Array.isArray(parsed.items)) setItems(parsed.items);
+    if (typeof parsed.input === "string") setInput(parsed.input);
+  } catch {
+    // Corrupted storage should never break the app
+    localStorage.removeItem(STORAGE_KEY);
+  }
+}, []);
+
+// Persist chat state whenever it changes
+useEffect(() => {
+  const payload: PersistedState = {
+    mode,
+    items,
+    input,
+  };
+
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+}, [mode, items, input]);
+
   // Demo prompts: one-click inputs for fast live demos (no copy/paste)
   const DEMO_COACH_LOGIN = `Feature: Login with Auth0, optional MFA
 
@@ -516,7 +552,15 @@ Expected: export stops, no file downloaded, status resets`;
         </HeaderButton>
 
         <div style={{ marginLeft: "auto" }}>
-          <HeaderButton onClick={() => setItems([])}>Clear</HeaderButton>
+          <HeaderButton
+            onClick={() => {
+                setItems([]);
+                setInput("");
+                localStorage.removeItem(STORAGE_KEY);
+            }}
+            >
+            Clear
+          </HeaderButton>
         </div>
       </div>
 
