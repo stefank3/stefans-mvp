@@ -31,6 +31,51 @@ type Mode = "coach" | "review";
  *   error?: string
  * }
  */
+
+/**
+ * Simple in-memory rate limiter (MVP).
+ * - Per-IP sliding window
+ * - Works well for demos and small usage
+ * - On Vercel, this is per-instance (not globally shared)
+ */
+
+const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+const RATE_LIMIT_MAX_REQUESTS = 20; // max requests per window per IP
+
+// Map<ip, timestamps[]>
+const ipBuckets = new Map<string, number[]>();
+
+function getClientIp(req: Request) {
+  // Vercel / proxies usually set this:
+  const xff = req.headers.get("x-forwarded-for");
+  if (xff) return xff.split(",")[0].trim();
+
+  // Some platforms use this:
+  const xrip = req.headers.get("x-real-ip");
+  if (xrip) return xrip.trim();
+
+  // Fallback
+  return "unknown";
+}
+
+function rateLimitOrThrow(ip: string) {
+  const now = Date.now();
+  const windowStart = now - RATE_LIMIT_WINDOW_MS;
+
+  const existing = ipBuckets.get(ip) ?? [];
+  // Keep only timestamps inside the window
+  const fresh = existing.filter((t) => t > windowStart);
+
+  if (fresh.length >= RATE_LIMIT_MAX_REQUESTS) {
+    const retryAfterMs = fresh[0] - windowStart; // when oldest falls out
+    return { allowed: false as const, retryAfterSec: Math.max(1, Math.ceil(retryAfterMs / 1000)) };
+  }
+
+  fresh.push(now);
+  ipBuckets.set(ip, fresh);
+  return { allowed: true as const, retryAfterSec: 0 };
+}
+
 export async function POST(req: Request) {
   try {
     // 1) Parse incoming request JSON
@@ -99,8 +144,26 @@ export async function POST(req: Request) {
         "Then propose a risk-based test strategy and a SMALL set of high-signal tests.",
         "Prefer unit/API over UI when appropriate.",
       ].join("\n");
+    
+    // 5) Rate limit (protect tokens / prevent abuse)
+    const ip = getClientIp(req);
+    const rl = rateLimitOrThrow(ip);
 
-
+    if (!rl.allowed) {
+    return NextResponse.json(
+        {
+        ok: false,
+        error: "Rate limit exceeded",
+        details: `Too many requests. Try again in ~${rl.retryAfterSec}s.`,
+        },
+        {
+        status: 429,
+        headers: {
+            "Retry-After": String(rl.retryAfterSec),
+        },
+        }
+    );
+    }
 
     // 6) Call the model (server-side)
     //    max_tokens is a HARD COST CAP per request
