@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 /**
  * Chat modes:
@@ -44,7 +44,18 @@ type PersistedState = {
   items: ChatItem[];
   input: string;
 };
-//local storage key
+
+/**
+ * Rate limit metadata (Step 2C)
+ * Returned by the API on success + on 429.
+ */
+type RateMeta = {
+  limit: number;
+  remaining: number;
+  resetSeconds: number;
+};
+
+/** Local storage key (so reload keeps the demo context). */
 const STORAGE_KEY = "stefans-mvp-chat-v1";
 
 /** Clamp helper to keep UI stable even if model returns values out of expected range. */
@@ -65,12 +76,12 @@ function reviewToMarkdown(r: ReviewResult) {
   const b = r.breakdown;
 
   const lines: string[] = [];
-  lines.push(`## QE Review`);
+  lines.push("## QE Review");
   lines.push(`**Score:** ${r.score}/100`);
   lines.push(`**Verdict:** ${mdSafe(r.verdict)}`);
   lines.push("");
 
-  lines.push(`### Breakdown`);
+  lines.push("### Breakdown");
   lines.push(`- Business relevance: ${b.businessRelevance}/25`);
   lines.push(`- Risk coverage: ${b.riskCoverage}/25`);
   lines.push(`- Design quality: ${b.designQuality}/20`);
@@ -80,8 +91,11 @@ function reviewToMarkdown(r: ReviewResult) {
 
   const addList = (title: string, items: string[]) => {
     lines.push(`### ${title}`);
-    if (!items || items.length === 0) lines.push(`- None`);
-    else for (const it of items) lines.push(`- ${mdSafe(it)}`);
+    if (!items || items.length === 0) {
+      lines.push("- None");
+    } else {
+      for (const it of items) lines.push(`- ${mdSafe(it)}`);
+    }
     lines.push("");
   };
 
@@ -236,11 +250,9 @@ function Section({ title, items }: { title: string; items: string[] }) {
 function ReviewCard({ review }: { review: ReviewResult }) {
   const score = clamp(Number(review.score) || 0, 0, 100);
 
-  // Quick “grade” label for demo impact.
   const grade =
     score >= 90 ? "Excellent" : score >= 75 ? "Good" : score >= 60 ? "Fair" : score >= 40 ? "Weak" : "Poor";
 
-  // Toast message shown after copy actions
   const [toast, setToast] = useState<string | null>(null);
 
   /** Auto-hide toast after 1.2 seconds for a clean UX. */
@@ -250,10 +262,7 @@ function ReviewCard({ review }: { review: ReviewResult }) {
     return () => clearTimeout(t);
   }, [toast]);
 
-  /**
-   * Copies text to clipboard with basic error handling.
-   * Uses the browser clipboard API (works on https or localhost).
-   */
+  /** Copies text to clipboard using the browser clipboard API. */
   const copyText = async (text: string, label: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -262,9 +271,6 @@ function ReviewCard({ review }: { review: ReviewResult }) {
       setToast("Copy failed (clipboard blocked)");
     }
   };
-
-  const copyMarkdown = () => copyText(reviewToMarkdown(review), "Markdown");
-  const copyJson = () => copyText(reviewToJson(review), "JSON");
 
   return (
     <div
@@ -277,7 +283,6 @@ function ReviewCard({ review }: { review: ReviewResult }) {
         color: "#111", // prevent white-on-white inheritance from dark main
       }}
     >
-      {/* Header */}
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           <div style={{ fontSize: 14, fontWeight: 900, letterSpacing: 0.2 }}>Review Score</div>
@@ -286,8 +291,8 @@ function ReviewCard({ review }: { review: ReviewResult }) {
 
         <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8 }}>
           <div style={{ display: "flex", gap: 8 }}>
-            <SmallButton onClick={copyMarkdown}>Copy MD</SmallButton>
-            <SmallButton onClick={copyJson} variant="dark">
+            <SmallButton onClick={() => copyText(reviewToMarkdown(review), "Markdown")}>Copy MD</SmallButton>
+            <SmallButton onClick={() => copyText(reviewToJson(review), "JSON")} variant="dark">
               Copy JSON
             </SmallButton>
           </div>
@@ -310,7 +315,6 @@ function ReviewCard({ review }: { review: ReviewResult }) {
         </div>
       </div>
 
-      {/* Toast */}
       {toast && (
         <div
           style={{
@@ -329,7 +333,6 @@ function ReviewCard({ review }: { review: ReviewResult }) {
         </div>
       )}
 
-      {/* Breakdown */}
       <div
         style={{
           marginTop: 14,
@@ -349,7 +352,6 @@ function ReviewCard({ review }: { review: ReviewResult }) {
         <BarRow label="Diagnostic value" value={review.breakdown.diagnosticValue} max={15} />
       </div>
 
-      {/* Lists */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 12, marginTop: 14 }}>
         <div style={{ border: "1px solid #eee", borderRadius: 14, padding: 12, background: "#fff" }}>
           <Section title="Top risk gaps" items={review.riskGaps} />
@@ -373,39 +375,43 @@ export default function ChatPage() {
   const [items, setItems] = useState<ChatItem[]>([]);
   const [isSending, setIsSending] = useState(false);
 
-  // Friendly rate-limit banner message (shown when API returns 429) 
+  /** Friendly banner message (shown when API returns 429). */
   const [rateLimitMsg, setRateLimitMsg] = useState<string | null>(null);
 
+  /** Last seen rate meta from the server (success or 429). */
+  const [rate, setRate] = useState<RateMeta | null>(null);
 
-// Load persisted chat state on first render
-useEffect(() => {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return;
+  // ---- Local persistence (demo-friendly) ------------------------------------
 
-    const parsed = JSON.parse(raw) as PersistedState;
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
 
-    if (parsed?.mode) setMode(parsed.mode);
-    if (Array.isArray(parsed.items)) setItems(parsed.items);
-    if (typeof parsed.input === "string") setInput(parsed.input);
-  } catch {
-    // Corrupted storage should never break the app
-    localStorage.removeItem(STORAGE_KEY);
-  }
-}, []);
+      const parsed = JSON.parse(raw) as PersistedState;
 
-// Persist chat state whenever it changes
-useEffect(() => {
-  const payload: PersistedState = {
-    mode,
-    items,
-    input,
-  };
+      if (parsed?.mode) setMode(parsed.mode);
+      if (Array.isArray(parsed.items)) setItems(parsed.items);
+      if (typeof parsed.input === "string") setInput(parsed.input);
+    } catch {
+      localStorage.removeItem(STORAGE_KEY);
+    }
+  }, []);
 
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-}, [mode, items, input]);
+  useEffect(() => {
+    const payload: PersistedState = { mode, items, input };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  }, [mode, items, input]);
 
-  // Demo prompts: one-click inputs for fast live demos (no copy/paste)
+  // Auto-hide banner after 4s
+  useEffect(() => {
+    if (!rateLimitMsg) return;
+    const t = setTimeout(() => setRateLimitMsg(null), 4000);
+    return () => clearTimeout(t);
+  }, [rateLimitMsg]);
+
+  // ---- Demo prompts (one-click) --------------------------------------------
+
   const DEMO_COACH_LOGIN = `Feature: Login with Auth0, optional MFA
 
 Context:
@@ -455,24 +461,26 @@ TC3: Cancel export
 Steps: Start export, click Cancel
 Expected: export stops, no file downloaded, status resets`;
 
-  /**
-   * Loads demo text into the input and switches to the appropriate mode.
-   * We do NOT auto-send to keep demos controlled.
-   */
   const loadDemo = (demoMode: Mode, text: string) => {
     setMode(demoMode);
     setInput(text);
   };
 
+  // ---- API interaction ------------------------------------------------------
+
   /**
    * Sends user message to /api/chat.
    * Appends either a chat message (coach) or a review card (review).
+   *
+   * Important UX rules:
+   * - If we get 429, we rollback the optimistic user message so the timeline stays clean.
+   * - We capture rate meta from both success and 429 so the UI can show remaining quota.
    */
   const send = async () => {
     const text = input.trim();
     if (!text || isSending) return;
 
-    // Add user message immediately (optimistic UI)
+    // optimistic UI: show user message immediately
     setItems((prev) => [...prev, { kind: "text", role: "user", text }]);
     setInput("");
     setIsSending(true);
@@ -485,23 +493,27 @@ Expected: export stops, no file downloaded, status resets`;
       });
 
       const data = await res.json().catch(() => ({}));
-    
-      // If rate-limited, show a friendly message and stop.
+
+      // Always capture server rate meta if present
+      if (data?.rate) setRate(data.rate as RateMeta);
+
+      // Rate limit: show banner + rollback optimistic user message
       if (res.status === 429) {
-      setRateLimitMsg(data?.details ?? "Rate limit reached. Please try again shortly.");
-      return;
+        setRateLimitMsg(data?.details ?? "Rate limit reached. Please try again shortly.");
+        setItems((prev) => prev.slice(0, -1)); // remove last optimistic user message
+        return;
       }
 
-      // Clear banner on successful/non-429 responses
+      // Clear banner on non-429 responses
       setRateLimitMsg(null);
 
-      // REVIEW success: render structured card
+      // REVIEW success
       if (res.ok && data?.mode === "review" && data?.review) {
         setItems((prev) => [...prev, { kind: "review", role: "bot", review: data.review as ReviewResult }]);
         return;
       }
 
-      // REVIEW parse/shape failure: show raw output for debugging
+      // REVIEW parse/shape failure
       if (data?.mode === "review" && data?.raw) {
         setItems((prev) => [
           ...prev,
@@ -510,7 +522,7 @@ Expected: export stops, no file downloaded, status resets`;
         return;
       }
 
-      // COACH success: show reply
+      // COACH success
       if (res.ok) {
         setItems((prev) => [...prev, { kind: "text", role: "bot", text: data?.reply ?? "No reply returned" }]);
         return;
@@ -522,7 +534,6 @@ Expected: export stops, no file downloaded, status resets`;
         { kind: "error", role: "bot", title: `API Error ${res.status}`, details: JSON.stringify(data, null, 2) },
       ]);
     } catch (e: any) {
-      // Network/client errors
       setItems((prev) => [
         ...prev,
         { kind: "error", role: "bot", title: "Network/Client error", details: e?.message ?? String(e) },
@@ -532,19 +543,34 @@ Expected: export stops, no file downloaded, status resets`;
     }
   };
 
+  // ---- UI helpers -----------------------------------------------------------
+
+  const rateChipText = useMemo(() => {
+    if (!rate) return null;
+    return `Rate: ${rate.remaining}/${rate.limit} · resets in ${rate.resetSeconds}s`;
+  }, [rate]);
+
+  const mainStyle: React.CSSProperties = {
+    padding: 24,
+    maxWidth: 980,
+    margin: "0 auto",
+    color: "#fff",
+    background: "radial-gradient(900px 360px at 50% -120px, rgba(255,255,255,0.12), rgba(0,0,0,0))",
+  };
+
+  const chatBoxStyle: React.CSSProperties = {
+    border: "1px solid #ddd",
+    borderRadius: 14,
+    padding: 14,
+    height: "62vh",
+    overflow: "auto",
+    background: "#fafafa",
+  };
+
   return (
-    <main
-      style={{
-        padding: 24,
-        maxWidth: 980,
-        margin: "0 auto",
-        color: "#fff",
-        background: "radial-gradient(900px 360px at 50% -120px, rgba(255,255,255,0.12), rgba(0,0,0,0))",
-      }}
-    >
+    <main style={mainStyle}>
       <h1 style={{ fontSize: 22, fontWeight: 900, marginBottom: 6 }}>Stefan’s MVP — QE Coach</h1>
 
-      {/* Demo buttons: one-click inputs for fast live demos */}
       <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
         <Chip>Demo</Chip>
         <HeaderButton onClick={() => loadDemo("coach", DEMO_COACH_LOGIN)}>Coach: Login + MFA</HeaderButton>
@@ -552,9 +578,10 @@ Expected: export stops, no file downloaded, status resets`;
         <HeaderButton onClick={() => loadDemo("review", DEMO_REVIEW_EXPORT)}>Review: Export CSV</HeaderButton>
       </div>
 
-      {/* Header controls */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
         <Chip>Mode: {mode === "coach" ? "Coach" : "Review"}</Chip>
+
+        {rateChipText && <Chip>{rateChipText}</Chip>}
 
         <HeaderButton active={mode === "coach"} onClick={() => setMode("coach")}>
           Coach
@@ -567,11 +594,13 @@ Expected: export stops, no file downloaded, status resets`;
         <div style={{ marginLeft: "auto" }}>
           <HeaderButton
             onClick={() => {
-                setItems([]);
-                setInput("");
-                localStorage.removeItem(STORAGE_KEY);
+              setItems([]);
+              setInput("");
+              setRate(null);
+              setRateLimitMsg(null);
+              localStorage.removeItem(STORAGE_KEY);
             }}
-            >
+          >
             Clear
           </HeaderButton>
         </div>
@@ -579,7 +608,7 @@ Expected: export stops, no file downloaded, status resets`;
 
       {rateLimitMsg && (
         <div
-            style={{
+          style={{
             marginBottom: 12,
             padding: "10px 12px",
             borderRadius: 12,
@@ -588,23 +617,13 @@ Expected: export stops, no file downloaded, status resets`;
             color: "#fff",
             fontSize: 13,
             fontWeight: 800,
-            }}
+          }}
         >
-            {rateLimitMsg}
+          {rateLimitMsg}
         </div>
-        )}
+      )}
 
-      {/* Chat area */}
-      <div
-        style={{
-          border: "1px solid #ddd",
-          borderRadius: 14,
-          padding: 14,
-          height: "62vh",
-          overflow: "auto",
-          background: "#fafafa",
-        }}
-      >
+      <div style={chatBoxStyle}>
         {items.length === 0 ? (
           <div style={{ color: "#666", fontSize: 13 }}>
             {mode === "coach"
@@ -659,7 +678,6 @@ Expected: export stops, no file downloaded, status resets`;
         )}
       </div>
 
-      {/* Input row */}
       <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
         <input
           value={input}
