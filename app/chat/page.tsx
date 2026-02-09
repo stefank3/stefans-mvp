@@ -373,6 +373,10 @@ export default function ChatPage() {
   const [items, setItems] = useState<ChatItem[]>([]);
   const [isSending, setIsSending] = useState(false);
 
+  // Friendly rate-limit banner message (shown when API returns 429) 
+  const [rateLimitMsg, setRateLimitMsg] = useState<string | null>(null);
+
+
 // Load persisted chat state on first render
 useEffect(() => {
   try {
@@ -481,6 +485,15 @@ Expected: export stops, no file downloaded, status resets`;
       });
 
       const data = await res.json().catch(() => ({}));
+    
+      // If rate-limited, show a friendly message and stop.
+      if (res.status === 429) {
+      setRateLimitMsg(data?.details ?? "Rate limit reached. Please try again shortly.");
+      return;
+      }
+
+      // Clear banner on successful/non-429 responses
+      setRateLimitMsg(null);
 
       // REVIEW success: render structured card
       if (res.ok && data?.mode === "review" && data?.review) {
@@ -563,6 +576,23 @@ Expected: export stops, no file downloaded, status resets`;
           </HeaderButton>
         </div>
       </div>
+
+      {rateLimitMsg && (
+        <div
+            style={{
+            marginBottom: 12,
+            padding: "10px 12px",
+            borderRadius: 12,
+            border: "1px solid rgba(255,255,255,0.22)",
+            background: "rgba(255,255,255,0.08)",
+            color: "#fff",
+            fontSize: 13,
+            fontWeight: 800,
+            }}
+        >
+            {rateLimitMsg}
+        </div>
+        )}
 
       {/* Chat area */}
       <div
