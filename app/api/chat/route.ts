@@ -101,18 +101,25 @@ export async function POST(req: Request) {
       ].join("\n");
 
 
-    // 6) Call the model (server-side).
-    //    - temperature low for consistency (mentor style, less randomness).
-    //    - model chosen for cost/performance for MVP (we can change later).
+
+    // 6) Call the model (server-side)
+    //    max_tokens is a HARD COST CAP per request
     const completion = await client.chat.completions.create({
-      model: "gpt-4.1-mini",
-      temperature: 0.2,
-      messages: [
+    model: "gpt-4.1-mini",
+    temperature: 0.2,
+
+    // ✅ COST CONTROL (IMPORTANT)
+    // Review mode is JSON-only → smaller output
+    // Coach mode may explain a bit more
+    max_tokens: mode === "review" ? 500 : 700,
+
+    messages: [
         { role: "system", content: QA_SYSTEM_PROMPT },
         { role: "system", content: modeInstruction },
         { role: "user", content: message },
-      ],
+    ],
     });
+
 
     // 7) Extract reply safely.
     const reply = completion.choices[0]?.message?.content ?? "No reply returned";
@@ -156,4 +163,5 @@ export async function POST(req: Request) {
       { status: 500 }
     );
   }
+  
 }
