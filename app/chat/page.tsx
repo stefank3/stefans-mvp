@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import UserBar from "./UserBar";
 
 /**
  * Chat modes:
@@ -534,18 +535,17 @@ Expected: export stops, no file downloaded, status resets`;
         { kind: "error", role: "bot", title: `API Error ${res.status}`, details: JSON.stringify(data, null, 2) },
       ]);
     } catch (e: unknown) {
-        const message =
-            e instanceof Error ? e.message : String(e);
+      const message = e instanceof Error ? e.message : String(e);
 
-        setItems((prev) => [
-            ...prev,
-            {
-            kind: "error",
-            role: "bot",
-            title: "Network/Client error",
-            details: message,
-            },
-        ]);
+      setItems((prev) => [
+        ...prev,
+        {
+          kind: "error",
+          role: "bot",
+          title: "Network/Client error",
+          details: message,
+        },
+      ]);
     } finally {
       setIsSending(false);
     }
@@ -599,7 +599,9 @@ Expected: export stops, no file downloaded, status resets`;
           Review
         </HeaderButton>
 
-        <div style={{ marginLeft: "auto" }}>
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
+          <UserBar />
+
           <HeaderButton
             onClick={() => {
               setItems([]);
