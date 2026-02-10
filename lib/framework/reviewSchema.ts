@@ -4,10 +4,10 @@
  */
 export type ReviewBreakdown = {
   businessRelevance: number; // 0-25
-  riskCoverage: number;      // 0-25
-  designQuality: number;     // 0-20
-  levelAndScope: number;     // 0-15
-  diagnosticValue: number;   // 0-15
+  riskCoverage: number; // 0-25
+  designQuality: number; // 0-20
+  levelAndScope: number; // 0-15
+  diagnosticValue: number; // 0-15
 };
 
 export type ReviewResult = {
@@ -23,20 +23,24 @@ export type ReviewResult = {
  * Minimal runtime validation to protect UI rendering.
  * (We keep it simple for MVP; later we can add zod.)
  */
-export function isReviewResult(x: any): x is ReviewResult {
+export function isReviewResult(x: unknown): x is ReviewResult {
+  if (typeof x !== "object" || x === null) return false;
+
+  const r = x as Record<string, unknown>;
+  const breakdown = r.breakdown as Record<string, unknown> | undefined;
+
   return (
-    x &&
-    typeof x === "object" &&
-    typeof x.score === "number" &&
-    typeof x.verdict === "string" &&
-    x.breakdown &&
-    typeof x.breakdown.businessRelevance === "number" &&
-    typeof x.breakdown.riskCoverage === "number" &&
-    typeof x.breakdown.designQuality === "number" &&
-    typeof x.breakdown.levelAndScope === "number" &&
-    typeof x.breakdown.diagnosticValue === "number" &&
-    Array.isArray(x.riskGaps) &&
-    Array.isArray(x.antiPatterns) &&
-    Array.isArray(x.improvements)
+    typeof r.score === "number" &&
+    typeof r.verdict === "string" &&
+    typeof breakdown === "object" &&
+    breakdown !== null &&
+    typeof breakdown.businessRelevance === "number" &&
+    typeof breakdown.riskCoverage === "number" &&
+    typeof breakdown.designQuality === "number" &&
+    typeof breakdown.levelAndScope === "number" &&
+    typeof breakdown.diagnosticValue === "number" &&
+    Array.isArray(r.riskGaps) &&
+    Array.isArray(r.antiPatterns) &&
+    Array.isArray(r.improvements)
   );
 }

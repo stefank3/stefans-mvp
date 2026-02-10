@@ -1,51 +1,35 @@
-import { NextRequest, NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
+import { NextResponse } from "next/server";
+import { auth0 } from "./lib/auth0";
 
-/**
- * MVP password protection using HTTP Basic Auth.
- * - Fastest way to protect demo access on Vercel.
- * - Prevents random visitors from consuming your OpenAI tokens.
- *
- * Set these in .env.local (and in Vercel env vars later):
- *  - BASIC_AUTH_USER
- *  - BASIC_AUTH_PASS
- */
-export function middleware(req: NextRequest) {
-  const user = process.env.BASIC_AUTH_USER;
-  const pass = process.env.BASIC_AUTH_PASS;
+export async function middleware(request: NextRequest) {
+  // Always run Auth0 middleware (session rolling + handles /auth routes)
+  const res = await auth0.middleware(request);
 
-  // If not configured, do nothing (dev convenience).
-  // For production you SHOULD set these.
-  if (!user || !pass) return NextResponse.next();
+  // ---- Protect your UI routes (custom gate) ----
+  const { pathname } = request.nextUrl;
 
-  const authHeader = req.headers.get("authorization");
-  if (!authHeader) return unauthorized();
+  // Allow public paths (tweak as you want)
+  const isPublic =
+    pathname.startsWith("/auth") ||
+    pathname.startsWith("/_next") ||
+    pathname === "/favicon.ico";
 
-  const [scheme, encoded] = authHeader.split(" ");
-  if (scheme !== "Basic" || !encoded) return unauthorized();
+  if (isPublic) return res;
 
-  const decoded = Buffer.from(encoded, "base64").toString("utf8");
-  const [u, p] = decoded.split(":");
+  // If no session, redirect to login
+  const session = await auth0.getSession(request);
+  if (!session) {
+    const loginUrl = new URL("/auth/login", request.url);
+    loginUrl.searchParams.set("returnTo", pathname);
+    return NextResponse.redirect(loginUrl);
+  }
 
-  if (u === user && p === pass) return NextResponse.next();
-  return unauthorized();
+  return res;
 }
 
-function unauthorized() {
-  return new NextResponse("Auth required", {
-    status: 401,
-    headers: {
-      "WWW-Authenticate": 'Basic realm="Stefan MVP"',
-    },
-  });
-}
-
-/**
- * Protect only the routes we care about:
- * - /chat (UI)
- * - /api/chat (model calls)
- *
- * You can expand later.
- */
 export const config = {
-  matcher: ["/chat/:path*", "/api/chat/:path*"],
+  matcher: [
+    "/((?!_next/static|_next/image|favicon.ico|sitemap.xml|robots.txt).*)",
+  ],
 };

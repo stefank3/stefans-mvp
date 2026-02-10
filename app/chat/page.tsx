@@ -533,11 +533,19 @@ Expected: export stops, no file downloaded, status resets`;
         ...prev,
         { kind: "error", role: "bot", title: `API Error ${res.status}`, details: JSON.stringify(data, null, 2) },
       ]);
-    } catch (e: any) {
-      setItems((prev) => [
-        ...prev,
-        { kind: "error", role: "bot", title: "Network/Client error", details: e?.message ?? String(e) },
-      ]);
+    } catch (e: unknown) {
+        const message =
+            e instanceof Error ? e.message : String(e);
+
+        setItems((prev) => [
+            ...prev,
+            {
+            kind: "error",
+            role: "bot",
+            title: "Network/Client error",
+            details: message,
+            },
+        ]);
     } finally {
       setIsSending(false);
     }
