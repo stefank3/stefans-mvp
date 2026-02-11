@@ -56,6 +56,10 @@ type RateMeta = {
   resetSeconds: number;
 };
 
+type MeResponse =
+  | { authenticated: true; email: string; roles: string[]; isAdmin: boolean }
+  | { authenticated: false };
+
 /** Local storage key (so reload keeps the demo context). */
 const STORAGE_KEY = "stefans-mvp-chat-v1";
 
@@ -170,14 +174,19 @@ function HeaderButton({
   active,
   children,
   onClick,
+  disabled,
 }: {
   active?: boolean;
   children: React.ReactNode;
   onClick: () => void;
+  disabled?: boolean;
 }) {
   return (
     <button
-      onClick={onClick}
+      onClick={() => {
+        if (disabled) return;
+        onClick();
+      }}
       style={{
         padding: "8px 12px",
         borderRadius: 10,
@@ -185,8 +194,9 @@ function HeaderButton({
         background: active ? "rgba(255,255,255,0.18)" : "rgba(255,255,255,0.06)",
         color: "#fff",
         fontWeight: 800,
-        cursor: "pointer",
+        cursor: disabled ? "not-allowed" : "pointer",
         outline: "none",
+        opacity: disabled ? 0.55 : 1,
       }}
     >
       {children}
@@ -281,7 +291,7 @@ function ReviewCard({ review }: { review: ReviewResult }) {
         padding: 16,
         background: "#fff",
         boxShadow: "0 6px 22px rgba(0,0,0,0.06)",
-        color: "#111", // prevent white-on-white inheritance from dark main
+        color: "#111",
       }}
     >
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
@@ -382,6 +392,22 @@ export default function ChatPage() {
   /** Last seen rate meta from the server (success or 429). */
   const [rate, setRate] = useState<RateMeta | null>(null);
 
+  // ✅ RBAC: load current user + roles once for UI gating
+  const [me, setMe] = useState<MeResponse | null>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("/api/me", { cache: "no-store" });
+        setMe((await res.json()) as MeResponse);
+      } catch {
+        setMe({ authenticated: false });
+      }
+    })();
+  }, []);
+
+  const isAdmin = !!(me && me.authenticated && me.isAdmin);
+
   // ---- Local persistence (demo-friendly) ------------------------------------
 
   useEffect(() => {
@@ -403,6 +429,13 @@ export default function ChatPage() {
     const payload: PersistedState = { mode, items, input };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
   }, [mode, items, input]);
+
+  // ✅ If a non-admin loads persisted Review mode, force back to Coach
+  useEffect(() => {
+    if (me && (!me.authenticated || !me.isAdmin) && mode === "review") {
+      setMode("coach");
+    }
+  }, [me, mode]);
 
   // Auto-hide banner after 4s
   useEffect(() => {
@@ -463,25 +496,17 @@ Steps: Start export, click Cancel
 Expected: export stops, no file downloaded, status resets`;
 
   const loadDemo = (demoMode: Mode, text: string) => {
+    if (demoMode === "review" && !isAdmin) return;
     setMode(demoMode);
     setInput(text);
   };
 
   // ---- API interaction ------------------------------------------------------
 
-  /**
-   * Sends user message to /api/chat.
-   * Appends either a chat message (coach) or a review card (review).
-   *
-   * Important UX rules:
-   * - If we get 429, we rollback the optimistic user message so the timeline stays clean.
-   * - We capture rate meta from both success and 429 so the UI can show remaining quota.
-   */
   const send = async () => {
     const text = input.trim();
     if (!text || isSending) return;
 
-    // optimistic UI: show user message immediately
     setItems((prev) => [...prev, { kind: "text", role: "user", text }]);
     setInput("");
     setIsSending(true);
@@ -495,26 +520,34 @@ Expected: export stops, no file downloaded, status resets`;
 
       const data = await res.json().catch(() => ({}));
 
-      // Always capture server rate meta if present
       if (data?.rate) setRate(data.rate as RateMeta);
 
-      // Rate limit: show banner + rollback optimistic user message
       if (res.status === 429) {
         setRateLimitMsg(data?.details ?? "Rate limit reached. Please try again shortly.");
-        setItems((prev) => prev.slice(0, -1)); // remove last optimistic user message
+        setItems((prev) => prev.slice(0, -1));
         return;
       }
 
-      // Clear banner on non-429 responses
+      if (res.status === 403) {
+        setItems((prev) => [
+          ...prev,
+          {
+            kind: "error",
+            role: "bot",
+            title: "Forbidden",
+            details: "Review mode is admin-only.",
+          },
+        ]);
+        return;
+      }
+
       setRateLimitMsg(null);
 
-      // REVIEW success
       if (res.ok && data?.mode === "review" && data?.review) {
         setItems((prev) => [...prev, { kind: "review", role: "bot", review: data.review as ReviewResult }]);
         return;
       }
 
-      // REVIEW parse/shape failure
       if (data?.mode === "review" && data?.raw) {
         setItems((prev) => [
           ...prev,
@@ -523,13 +556,11 @@ Expected: export stops, no file downloaded, status resets`;
         return;
       }
 
-      // COACH success
       if (res.ok) {
         setItems((prev) => [...prev, { kind: "text", role: "bot", text: data?.reply ?? "No reply returned" }]);
         return;
       }
 
-      // API error (non-200)
       setItems((prev) => [
         ...prev,
         { kind: "error", role: "bot", title: `API Error ${res.status}`, details: JSON.stringify(data, null, 2) },
@@ -582,8 +613,13 @@ Expected: export stops, no file downloaded, status resets`;
       <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
         <Chip>Demo</Chip>
         <HeaderButton onClick={() => loadDemo("coach", DEMO_COACH_LOGIN)}>Coach: Login + MFA</HeaderButton>
-        <HeaderButton onClick={() => loadDemo("review", DEMO_REVIEW_LOGIN)}>Review: Login + MFA</HeaderButton>
-        <HeaderButton onClick={() => loadDemo("review", DEMO_REVIEW_EXPORT)}>Review: Export CSV</HeaderButton>
+
+        {isAdmin && (
+          <>
+            <HeaderButton onClick={() => loadDemo("review", DEMO_REVIEW_LOGIN)}>Review: Login + MFA</HeaderButton>
+            <HeaderButton onClick={() => loadDemo("review", DEMO_REVIEW_EXPORT)}>Review: Export CSV</HeaderButton>
+          </>
+        )}
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
@@ -595,8 +631,12 @@ Expected: export stops, no file downloaded, status resets`;
           Coach
         </HeaderButton>
 
-        <HeaderButton active={mode === "review"} onClick={() => setMode("review")}>
-          Review
+        <HeaderButton
+          active={mode === "review"}
+          onClick={() => setMode("review")}
+          disabled={!isAdmin}
+        >
+          Review {!isAdmin ? "🔒" : ""}
         </HeaderButton>
 
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>

@@ -1,4 +1,9 @@
 import { Auth0Client } from "@auth0/nextjs-auth0/server";
 
-// v4 SDK reads config from env vars by default
-export const auth0 = new Auth0Client();
+export const auth0 = new Auth0Client({
+  appBaseUrl: process.env.APP_BASE_URL, // REQUIRED in v4
+  authorizationParameters: {
+    audience: "https://stefans-mvp-api", // Must match API Identifier
+    scope: "openid profile email",
+  },
+});

@@ -1,5 +1,8 @@
 // ===========================
-// ✅ Step 3.2.2: Protect /api/chat with Auth0 session + per-user rate limiting
+// ✅ /api/chat (production)
+// - Auth0 session required (API not public)
+// - Upstash per-user rate limiting
+// - RBAC: Review mode is admin-only (roles claim in Access Token)
 // ===========================
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
@@ -8,12 +11,17 @@ import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { QA_SYSTEM_PROMPT } from "@/lib/framework/systemPrompt";
 import { isReviewResult } from "@/lib/framework/reviewSchema";
-
-// ✅ ADDED: Use your v4 Auth0 client
 import { auth0 } from "@/lib/auth0";
 
 // ---------------------------
-// ✅ Upstash Redis-backed limiter (global across Vercel instances)
+// RBAC: Auth0 Post-Login Action must set this claim in Access Token:
+// api.accessToken.setCustomClaim("https://stefans-mvp/claims/roles", roles)
+// ---------------------------
+const ROLES_CLAIM = "https://stefans-mvp/claims/roles";
+const ADMIN_ROLE = "admin";
+
+// ---------------------------
+// Rate limiting (global across Vercel instances)
 // Env vars required (local + Vercel):
 // - UPSTASH_REDIS_REST_URL
 // - UPSTASH_REDIS_REST_TOKEN
@@ -33,12 +41,10 @@ const ratelimit = new Ratelimit({
   prefix: RATE_LIMIT.prefix,
 });
 
-/**
- * Create a single OpenAI client instance for this server runtime.
- */
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// ---------------------------
+// OpenAI client (server-side only)
+// ---------------------------
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 type Mode = "coach" | "review";
 
@@ -49,7 +55,8 @@ type RateMeta = {
 };
 
 /**
- * Fallback identifier (only used if Auth0 sub is missing).
+ * Fallback identifier (only used if Auth0 `sub` is missing).
+ * This should be rare because we require a session.
  */
 function getIpIdentifier(req: Request): string {
   const xff = req.headers.get("x-forwarded-for");
@@ -61,6 +68,7 @@ function getIpIdentifier(req: Request): string {
   return "ip:unknown";
 }
 
+/** Attach standard rate-limit headers consistently. */
 function rateHeaders(meta: RateMeta, retryAfterSec?: number) {
   const headers: Record<string, string> = {
     "X-RateLimit-Limit": String(meta.limit),
@@ -68,11 +76,41 @@ function rateHeaders(meta: RateMeta, retryAfterSec?: number) {
     "X-RateLimit-Reset": String(meta.resetSeconds),
   };
 
-  if (retryAfterSec && retryAfterSec > 0) {
-    headers["Retry-After"] = String(retryAfterSec);
-  }
-
+  if (retryAfterSec && retryAfterSec > 0) headers["Retry-After"] = String(retryAfterSec);
   return headers;
+}
+
+/**
+ * Decode JWT payload without signature verification.
+ * We only use this to read claims from the Access Token obtained server-side via Auth0.
+ */
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  const parts = token.split(".");
+  if (parts.length < 2) return null;
+
+  try {
+    const json = Buffer.from(parts[1], "base64url").toString("utf8");
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Get roles from the Access Token custom claim.
+ * In Auth0 Next.js SDK v4, session.user may not include namespaced custom claims,
+ * so Access Token is the reliable source for RBAC enforcement.
+ */
+async function getRolesFromAccessToken(): Promise<string[]> {
+  const tokenResult = await auth0.getAccessToken();
+  const token = tokenResult?.token;
+
+  // If token is missing or not a JWT, treat as no roles.
+  if (!token || token.split(".").length !== 3) return [];
+
+  const claims = decodeJwtPayload(token);
+  const rolesValue = claims?.[ROLES_CLAIM];
+  return Array.isArray(rolesValue) ? (rolesValue as string[]) : [];
 }
 
 export async function POST(req: Request) {
@@ -80,11 +118,9 @@ export async function POST(req: Request) {
 
   try {
     // ===========================
-    // ✅ Step 3.2.2: Require Auth0 session
+    // 0) Require Auth0 session (API is not public)
     // ===========================
     const session = await auth0.getSession();
-
-    // No session => API is protected (even if someone calls it directly)
     if (!session?.user) {
       return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
     }
@@ -94,42 +130,48 @@ export async function POST(req: Request) {
     const identifier = sub ? `user:${sub}` : getIpIdentifier(req);
 
     // ===========================
-    // 1) Parse incoming request JSON
+    // 1) Parse request
     // ===========================
     const body = (await req.json()) as { message?: string; mode?: Mode };
-
     const message = body?.message;
     const mode: Mode = body?.mode === "review" ? "review" : "coach";
 
-    // 2) Safety guard: ensure server has the API key.
+    // ===========================
+    // 2) Safety guard: API key must exist
+    // ===========================
     if (!process.env.OPENAI_API_KEY) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "OPENAI_API_KEY is not set (check .env.local and restart dev server)",
-        },
+        { ok: false, error: "OPENAI_API_KEY is not set (check .env.local and restart dev server)" },
         { status: 500 }
       );
     }
 
-    // 3) Validate input early.
+    // ===========================
+    // 3) Validate input early
+    // ===========================
     if (!message || typeof message !== "string") {
-      return NextResponse.json(
-        { ok: false, error: "Missing 'message' (must be a string)" },
-        { status: 400 }
-      );
-    }
-
-    // 4) Basic cost/abuse guard: prevent huge inputs from exploding costs.
-    if (message.length > 8000) {
-      return NextResponse.json(
-        { ok: false, error: "Message too long (max 8000 characters)" },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "Missing 'message' (must be a string)" }, { status: 400 });
     }
 
     // ===========================
-    // 5) ✅ Global rate limit (Upstash) — now keyed by user
+    // 4) Cost/abuse guard: cap input size
+    // ===========================
+    if (message.length > 8000) {
+      return NextResponse.json({ ok: false, error: "Message too long (max 8000 characters)" }, { status: 400 });
+    }
+
+    // ===========================
+    // 5) RBAC: Review mode is admin-only (server enforced)
+    // ===========================
+    if (mode === "review") {
+      const roles = await getRolesFromAccessToken();
+      if (!roles.includes(ADMIN_ROLE)) {
+        return NextResponse.json({ ok: false, mode, error: "Forbidden" }, { status: 403 });
+      }
+    }
+
+    // ===========================
+    // 6) Rate limit (Upstash)
     // ===========================
     const { success, remaining, reset } = await ratelimit.limit(identifier);
 
@@ -150,14 +192,13 @@ export async function POST(req: Request) {
           details: `Too many requests. Try again in ~${resetSeconds}s.`,
           rate: { ...rateMeta, remaining: 0 },
         },
-        {
-          status: 429,
-          headers: rateHeaders({ ...rateMeta, remaining: 0 }, resetSeconds),
-        }
+        { status: 429, headers: rateHeaders({ ...rateMeta, remaining: 0 }, resetSeconds) }
       );
     }
 
-    // 6) Mode-specific instruction
+    // ===========================
+    // 7) Mode-specific instruction
+    // ===========================
     const modeInstruction =
       mode === "review"
         ? [
@@ -190,7 +231,9 @@ export async function POST(req: Request) {
             "Prefer unit/API over UI when appropriate.",
           ].join("\n");
 
-    // 7) Call the model
+    // ===========================
+    // 8) Call the model
+    // ===========================
     const completion = await client.chat.completions.create({
       model: "gpt-4.1-mini",
       temperature: 0.2,
@@ -202,10 +245,14 @@ export async function POST(req: Request) {
       ],
     });
 
-    // 8) Extract reply safely.
+    // ===========================
+    // 9) Extract reply
+    // ===========================
     const reply = completion.choices[0]?.message?.content ?? "No reply returned";
 
-    // 9) REVIEW mode: parse model output as JSON
+    // ===========================
+    // 10) REVIEW mode: parse model output as JSON
+    // ===========================
     if (mode === "review") {
       const raw = reply.trim();
       const start = raw.indexOf("{");
@@ -234,23 +281,16 @@ export async function POST(req: Request) {
       }
     }
 
-    // 10) Coach mode returns plain text.
-    return NextResponse.json(
-      { ok: true, mode, reply, rate: rateMeta },
-      { status: 200, headers: rateHeaders(rateMeta) }
-    );
+    // ===========================
+    // 11) Coach mode returns plain text
+    // ===========================
+    return NextResponse.json({ ok: true, mode, reply, rate: rateMeta }, { status: 200, headers: rateHeaders(rateMeta) });
   } catch (e: unknown) {
-  const message =
-    e instanceof Error ? e.message : "Unknown server error";
+    const message = e instanceof Error ? e.message : "Unknown server error";
 
-  return NextResponse.json(
-    {
-      ok: false,
-      error: "Server error",
-      details: message,
-      ...(rateMeta ? { rate: rateMeta } : {}),
-    },
-    { status: 500, ...(rateMeta ? { headers: rateHeaders(rateMeta) } : {}) }
-  );
-}
+    return NextResponse.json(
+      { ok: false, error: "Server error", details: message, ...(rateMeta ? { rate: rateMeta } : {}) },
+      { status: 500, ...(rateMeta ? { headers: rateHeaders(rateMeta) } : {}) }
+    );
+  }
 }
