@@ -34,11 +34,13 @@ type ReviewResult = {
  * - text: normal user/bot chat messages
  * - review: structured scorecard output
  * - error: API/runtime errors shown to the user
+ *
+ * requestId is optional metadata used for debugging & correlation with server logs.
  */
 type ChatItem =
-  | { kind: "text"; role: "user" | "bot"; text: string }
-  | { kind: "review"; role: "bot"; review: ReviewResult }
-  | { kind: "error"; role: "bot"; title: string; details: string };
+  | { kind: "text"; role: "user" | "bot"; text: string; requestId?: string }
+  | { kind: "review"; role: "bot"; review: ReviewResult; requestId?: string }
+  | { kind: "error"; role: "bot"; title: string; details: string; requestId?: string };
 
 type PersistedState = {
   mode: Mode;
@@ -47,18 +49,13 @@ type PersistedState = {
 };
 
 /**
- * Rate limit metadata (Step 2C)
- * Returned by the API on success + on 429.
+ * Rate limit metadata (returned by the API on success + on 429).
  */
 type RateMeta = {
   limit: number;
   remaining: number;
   resetSeconds: number;
 };
-
-type MeResponse =
-  | { authenticated: true; email: string; roles: string[]; isAdmin: boolean }
-  | { authenticated: false };
 
 /** Local storage key (so reload keeps the demo context). */
 const STORAGE_KEY = "stefans-mvp-chat-v1";
@@ -96,11 +93,8 @@ function reviewToMarkdown(r: ReviewResult) {
 
   const addList = (title: string, items: string[]) => {
     lines.push(`### ${title}`);
-    if (!items || items.length === 0) {
-      lines.push("- None");
-    } else {
-      for (const it of items) lines.push(`- ${mdSafe(it)}`);
-    }
+    if (!items || items.length === 0) lines.push("- None");
+    else for (const it of items) lines.push(`- ${mdSafe(it)}`);
     lines.push("");
   };
 
@@ -117,6 +111,20 @@ function reviewToMarkdown(r: ReviewResult) {
  */
 function reviewToJson(r: ReviewResult) {
   return JSON.stringify(r, null, 2);
+}
+
+/**
+ * Generate a client-side request id for correlation.
+ * Uses crypto.randomUUID() when available, else a small fallback.
+ */
+function createRequestId(): string {
+  // Browser runtime: crypto.randomUUID is widely supported in modern browsers
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return (crypto as Crypto).randomUUID();
+  }
+
+  // Fallback: not cryptographically strong, but adequate for correlation IDs
+  return `rid_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
 /** Breakdown row with a progress bar (simple MVP UI, no external libs). */
@@ -183,10 +191,8 @@ function HeaderButton({
 }) {
   return (
     <button
-      onClick={() => {
-        if (disabled) return;
-        onClick();
-      }}
+      onClick={onClick}
+      disabled={disabled}
       style={{
         padding: "8px 12px",
         borderRadius: 10,
@@ -195,8 +201,8 @@ function HeaderButton({
         color: "#fff",
         fontWeight: 800,
         cursor: disabled ? "not-allowed" : "pointer",
-        outline: "none",
         opacity: disabled ? 0.55 : 1,
+        outline: "none",
       }}
     >
       {children}
@@ -260,7 +266,6 @@ function Section({ title, items }: { title: string; items: string[] }) {
  */
 function ReviewCard({ review }: { review: ReviewResult }) {
   const score = clamp(Number(review.score) || 0, 0, 100);
-
   const grade =
     score >= 90 ? "Excellent" : score >= 75 ? "Good" : score >= 60 ? "Fair" : score >= 40 ? "Weak" : "Poor";
 
@@ -392,21 +397,8 @@ export default function ChatPage() {
   /** Last seen rate meta from the server (success or 429). */
   const [rate, setRate] = useState<RateMeta | null>(null);
 
-  // ✅ RBAC: load current user + roles once for UI gating
-  const [me, setMe] = useState<MeResponse | null>(null);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await fetch("/api/me", { cache: "no-store" });
-        setMe((await res.json()) as MeResponse);
-      } catch {
-        setMe({ authenticated: false });
-      }
-    })();
-  }, []);
-
-  const isAdmin = !!(me && me.authenticated && me.isAdmin);
+  /** Last correlation id returned by the server (header X-Request-Id). */
+  const [lastRequestId, setLastRequestId] = useState<string | null>(null);
 
   // ---- Local persistence (demo-friendly) ------------------------------------
 
@@ -429,13 +421,6 @@ export default function ChatPage() {
     const payload: PersistedState = { mode, items, input };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
   }, [mode, items, input]);
-
-  // ✅ If a non-admin loads persisted Review mode, force back to Coach
-  useEffect(() => {
-    if (me && (!me.authenticated || !me.isAdmin) && mode === "review") {
-      setMode("coach");
-    }
-  }, [me, mode]);
 
   // Auto-hide banner after 4s
   useEffect(() => {
@@ -496,77 +481,114 @@ Steps: Start export, click Cancel
 Expected: export stops, no file downloaded, status resets`;
 
   const loadDemo = (demoMode: Mode, text: string) => {
-    if (demoMode === "review" && !isAdmin) return;
     setMode(demoMode);
     setInput(text);
   };
 
   // ---- API interaction ------------------------------------------------------
 
+  /**
+   * Sends user message to /api/chat.
+   * Adds x-request-id header so server logs correlate with UI actions.
+   *
+   * UX rules:
+   * - On 429, rollback optimistic user message so the timeline stays clean.
+   * - Capture rate meta from both success and 429.
+   * - Capture X-Request-Id from response (source of truth) and attach it to UI items.
+   */
   const send = async () => {
     const text = input.trim();
     if (!text || isSending) return;
 
-    setItems((prev) => [...prev, { kind: "text", role: "user", text }]);
+    // Create correlation id per send (client side)
+    const clientRequestId = createRequestId();
+
+    // optimistic UI: show user message immediately (include requestId metadata)
+    setItems((prev) => [...prev, { kind: "text", role: "user", text, requestId: clientRequestId }]);
     setInput("");
     setIsSending(true);
 
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-request-id": clientRequestId, // correlation
+        },
         body: JSON.stringify({ message: text, mode }),
       });
 
       const data = await res.json().catch(() => ({}));
 
+      // Server correlation id (header) is the authoritative id for logs
+      const serverRequestId = res.headers.get("x-request-id") || clientRequestId;
+      setLastRequestId(serverRequestId);
+
+      // Always capture server rate meta if present
       if (data?.rate) setRate(data.rate as RateMeta);
 
+      // Rate limit: show banner + rollback optimistic user message
       if (res.status === 429) {
-        setRateLimitMsg(data?.details ?? "Rate limit reached. Please try again shortly.");
-        setItems((prev) => prev.slice(0, -1));
+        setRateLimitMsg(
+          `${data?.details ?? "Rate limit reached. Please try again shortly."} (requestId: ${serverRequestId})`
+        );
+
+        setItems((prev) => prev.slice(0, -1)); // remove last optimistic user message
         return;
       }
 
-      if (res.status === 403) {
+      // Clear banner on non-429 responses
+      setRateLimitMsg(null);
+
+      // REVIEW success
+      if (res.ok && data?.mode === "review" && data?.review) {
+        setItems((prev) => [
+          ...prev,
+          { kind: "review", role: "bot", review: data.review as ReviewResult, requestId: serverRequestId },
+        ]);
+        return;
+      }
+
+      // REVIEW parse/shape failure (still 200)
+      if (data?.mode === "review" && data?.raw) {
         setItems((prev) => [
           ...prev,
           {
             kind: "error",
             role: "bot",
-            title: "Forbidden",
-            details: "Review mode is admin-only.",
+            title: data?.error ?? "Review parsing issue",
+            details: String(data.raw),
+            requestId: serverRequestId,
           },
         ]);
         return;
       }
 
-      setRateLimitMsg(null);
-
-      if (res.ok && data?.mode === "review" && data?.review) {
-        setItems((prev) => [...prev, { kind: "review", role: "bot", review: data.review as ReviewResult }]);
-        return;
-      }
-
-      if (data?.mode === "review" && data?.raw) {
+      // COACH success
+      if (res.ok) {
         setItems((prev) => [
           ...prev,
-          { kind: "error", role: "bot", title: data?.error ?? "Review parsing issue", details: String(data.raw) },
+          { kind: "text", role: "bot", text: data?.reply ?? "No reply returned", requestId: serverRequestId },
         ]);
         return;
       }
 
-      if (res.ok) {
-        setItems((prev) => [...prev, { kind: "text", role: "bot", text: data?.reply ?? "No reply returned" }]);
-        return;
-      }
-
+      // API error (non-200)
       setItems((prev) => [
         ...prev,
-        { kind: "error", role: "bot", title: `API Error ${res.status}`, details: JSON.stringify(data, null, 2) },
+        {
+          kind: "error",
+          role: "bot",
+          title: `API Error ${res.status}`,
+          details: JSON.stringify(data, null, 2),
+          requestId: serverRequestId,
+        },
       ]);
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
+
+      // If fetch fails, we only have the client requestId (still useful)
+      setLastRequestId(clientRequestId);
 
       setItems((prev) => [
         ...prev,
@@ -575,6 +597,7 @@ Expected: export stops, no file downloaded, status resets`;
           role: "bot",
           title: "Network/Client error",
           details: message,
+          requestId: clientRequestId,
         },
       ]);
     } finally {
@@ -612,14 +635,15 @@ Expected: export stops, no file downloaded, status resets`;
 
       <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
         <Chip>Demo</Chip>
-        <HeaderButton onClick={() => loadDemo("coach", DEMO_COACH_LOGIN)}>Coach: Login + MFA</HeaderButton>
-
-        {isAdmin && (
-          <>
-            <HeaderButton onClick={() => loadDemo("review", DEMO_REVIEW_LOGIN)}>Review: Login + MFA</HeaderButton>
-            <HeaderButton onClick={() => loadDemo("review", DEMO_REVIEW_EXPORT)}>Review: Export CSV</HeaderButton>
-          </>
-        )}
+        <HeaderButton onClick={() => loadDemo("coach", DEMO_COACH_LOGIN)} disabled={isSending}>
+          Coach: Login + MFA
+        </HeaderButton>
+        <HeaderButton onClick={() => loadDemo("review", DEMO_REVIEW_LOGIN)} disabled={isSending}>
+          Review: Login + MFA
+        </HeaderButton>
+        <HeaderButton onClick={() => loadDemo("review", DEMO_REVIEW_EXPORT)} disabled={isSending}>
+          Review: Export CSV
+        </HeaderButton>
       </div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
@@ -627,16 +651,15 @@ Expected: export stops, no file downloaded, status resets`;
 
         {rateChipText && <Chip>{rateChipText}</Chip>}
 
-        <HeaderButton active={mode === "coach"} onClick={() => setMode("coach")}>
+        {/* Optional: show last request id for quick copy/debug */}
+        {lastRequestId && <Chip>requestId: {lastRequestId.slice(0, 8)}…</Chip>}
+
+        <HeaderButton active={mode === "coach"} onClick={() => setMode("coach")} disabled={isSending}>
           Coach
         </HeaderButton>
 
-        <HeaderButton
-          active={mode === "review"}
-          onClick={() => setMode("review")}
-          disabled={!isAdmin}
-        >
-          Review {!isAdmin ? "🔒" : ""}
+        <HeaderButton active={mode === "review"} onClick={() => setMode("review")} disabled={isSending}>
+          Review
         </HeaderButton>
 
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
@@ -648,8 +671,10 @@ Expected: export stops, no file downloaded, status resets`;
               setInput("");
               setRate(null);
               setRateLimitMsg(null);
+              setLastRequestId(null);
               localStorage.removeItem(STORAGE_KEY);
             }}
+            disabled={isSending}
           >
             Clear
           </HeaderButton>
@@ -701,13 +726,31 @@ Expected: export stops, no file downloaded, status resets`;
                       }}
                     >
                       {it.text}
+                      {/* Small debug footer (kept subtle) */}
+                      {it.requestId && (
+                        <div style={{ marginTop: 8, fontSize: 11, opacity: 0.6 }}>
+                          requestId: {it.requestId.slice(0, 8)}…
+                        </div>
+                      )}
                     </div>
                   </div>
                 );
               }
 
-              if (it.kind === "review") return <ReviewCard key={idx} review={it.review} />;
+              if (it.kind === "review") {
+                return (
+                  <div key={idx} style={{ display: "grid", gap: 8 }}>
+                    <ReviewCard review={it.review} />
+                    {it.requestId && (
+                      <div style={{ fontSize: 11, opacity: 0.65, color: "#111" }}>
+                        requestId: {it.requestId}
+                      </div>
+                    )}
+                  </div>
+                );
+              }
 
+              // Error card
               return (
                 <div
                   key={idx}
@@ -721,6 +764,11 @@ Expected: export stops, no file downloaded, status resets`;
                 >
                   <div style={{ fontWeight: 900, marginBottom: 8 }}>{it.title}</div>
                   <pre style={{ margin: 0, whiteSpace: "pre-wrap", fontSize: 12 }}>{it.details}</pre>
+                  {it.requestId && (
+                    <div style={{ marginTop: 8, fontSize: 12, fontWeight: 800 }}>
+                      requestId: <span style={{ fontFamily: "monospace" }}>{it.requestId}</span>
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -757,7 +805,7 @@ Expected: export stops, no file downloaded, status resets`;
             color: "#fff",
             fontWeight: 900,
             opacity: isSending ? 0.7 : 1,
-            cursor: "pointer",
+            cursor: isSending ? "not-allowed" : "pointer",
           }}
           disabled={isSending}
         >

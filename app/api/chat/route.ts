@@ -1,31 +1,30 @@
+// app/api/chat/route.ts
 // ===========================
-// ✅ /api/chat (production)
+// ✅ /api/chat (production + observability + metrics)
 // - Auth0 session required (API not public)
 // - Upstash per-user rate limiting
 // - RBAC: Review mode is admin-only (roles claim in Access Token)
+// - Observability: requestId correlation + latency + structured logs
+// - Metrics: Redis bucket counters (5-min buckets)
 // ===========================
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
+import { randomUUID } from "crypto";
 
-import { NextResponse } from "next/server";
 import OpenAI from "openai";
+import { NextResponse } from "next/server";
+
+import { auth0 } from "@/lib/auth0";
+import { log } from "@/lib/logger";
 import { QA_SYSTEM_PROMPT } from "@/lib/framework/systemPrompt";
 import { isReviewResult } from "@/lib/framework/reviewSchema";
-import { auth0 } from "@/lib/auth0";
+import { isAdminFromAccessToken } from "@/lib/auth/rbac";
+import { recordChatMetric, type ChatMetricMode } from "@/lib/metrics/chatMetrics";
 
-// ---------------------------
-// RBAC: Auth0 Post-Login Action must set this claim in Access Token:
-// api.accessToken.setCustomClaim("https://stefans-mvp/claims/roles", roles)
-// ---------------------------
-const ROLES_CLAIM = "https://stefans-mvp/claims/roles";
-const ADMIN_ROLE = "admin";
-
-// ---------------------------
-// Rate limiting (global across Vercel instances)
-// Env vars required (local + Vercel):
-// - UPSTASH_REDIS_REST_URL
-// - UPSTASH_REDIS_REST_TOKEN
-// ---------------------------
 const redis = Redis.fromEnv();
 
 const RATE_LIMIT = {
@@ -41,9 +40,6 @@ const ratelimit = new Ratelimit({
   prefix: RATE_LIMIT.prefix,
 });
 
-// ---------------------------
-// OpenAI client (server-side only)
-// ---------------------------
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 type Mode = "coach" | "review";
@@ -56,7 +52,7 @@ type RateMeta = {
 
 /**
  * Fallback identifier (only used if Auth0 `sub` is missing).
- * This should be rare because we require a session.
+ * Should be rare because we require session.
  */
 function getIpIdentifier(req: Request): string {
   const xff = req.headers.get("x-forwarded-for");
@@ -68,111 +64,138 @@ function getIpIdentifier(req: Request): string {
   return "ip:unknown";
 }
 
-/** Attach standard rate-limit headers consistently. */
-function rateHeaders(meta: RateMeta, retryAfterSec?: number) {
-  const headers: Record<string, string> = {
-    "X-RateLimit-Limit": String(meta.limit),
-    "X-RateLimit-Remaining": String(meta.remaining),
-    "X-RateLimit-Reset": String(meta.resetSeconds),
-  };
+/**
+ * Standard response headers:
+ * - Always includes X-Request-Id for correlation
+ * - Optionally includes rate-limit headers
+ */
+function responseHeaders(requestId: string, meta?: RateMeta, retryAfterSec?: number) {
+  const headers: Record<string, string> = { "X-Request-Id": requestId };
+
+  if (meta) {
+    headers["X-RateLimit-Limit"] = String(meta.limit);
+    headers["X-RateLimit-Remaining"] = String(meta.remaining);
+    headers["X-RateLimit-Reset"] = String(meta.resetSeconds);
+  }
 
   if (retryAfterSec && retryAfterSec > 0) headers["Retry-After"] = String(retryAfterSec);
+
   return headers;
 }
 
-/**
- * Decode JWT payload without signature verification.
- * We only use this to read claims from the Access Token obtained server-side via Auth0.
- */
-function decodeJwtPayload(token: string): Record<string, unknown> | null {
-  const parts = token.split(".");
-  if (parts.length < 2) return null;
-
-  try {
-    const json = Buffer.from(parts[1], "base64url").toString("utf8");
-    return JSON.parse(json);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Get roles from the Access Token custom claim.
- * In Auth0 Next.js SDK v4, session.user may not include namespaced custom claims,
- * so Access Token is the reliable source for RBAC enforcement.
- */
-async function getRolesFromAccessToken(): Promise<string[]> {
-  const tokenResult = await auth0.getAccessToken();
-  const token = tokenResult?.token;
-
-  // If token is missing or not a JWT, treat as no roles.
-  if (!token || token.split(".").length !== 3) return [];
-
-  const claims = decodeJwtPayload(token);
-  const rolesValue = claims?.[ROLES_CLAIM];
-  return Array.isArray(rolesValue) ? (rolesValue as string[]) : [];
-}
-
 export async function POST(req: Request) {
+  const inbound = req.headers.get("x-request-id");
+  const requestId = inbound && inbound.length < 200 ? inbound : randomUUID();
+
+  const startTime = Date.now();
+
+  let userId: string | undefined;
+  let modeForLog: ChatMetricMode = "unknown";
   let rateMeta: RateMeta | null = null;
 
   try {
-    // ===========================
-    // 0) Require Auth0 session (API is not public)
-    // ===========================
+    // 0) Require Auth0 session
     const session = await auth0.getSession();
     if (!session?.user) {
-      return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 });
-    }
+      log("warn", { requestId, event: "unauthorized", mode: modeForLog, meta: { path: "/api/chat" } });
 
-    // Prefer per-user rate limiting (best practice)
-    const sub = session.user.sub as string | undefined;
-    const identifier = sub ? `user:${sub}` : getIpIdentifier(req);
+      await recordChatMetric({
+        nowMs: Date.now(),
+        mode: modeForLog,
+        status: 401,
+        latencyMs: Date.now() - startTime,
+      });
 
-    // ===========================
-    // 1) Parse request
-    // ===========================
-    const body = (await req.json()) as { message?: string; mode?: Mode };
-    const message = body?.message;
-    const mode: Mode = body?.mode === "review" ? "review" : "coach";
-
-    // ===========================
-    // 2) Safety guard: API key must exist
-    // ===========================
-    if (!process.env.OPENAI_API_KEY) {
       return NextResponse.json(
-        { ok: false, error: "OPENAI_API_KEY is not set (check .env.local and restart dev server)" },
-        { status: 500 }
+        { ok: false, error: "Unauthorized" },
+        { status: 401, headers: responseHeaders(requestId) }
       );
     }
 
-    // ===========================
-    // 3) Validate input early
-    // ===========================
+    userId = (session.user.sub as string | undefined) ?? "unknown";
+    const identifier = userId !== "unknown" ? `user:${userId}` : getIpIdentifier(req);
+
+    // 1) Parse request
+    const body = (await req.json()) as { message?: string; mode?: Mode };
+    const message = body?.message;
+    const mode: Mode = body?.mode === "review" ? "review" : "coach";
+    modeForLog = mode;
+
+    log("info", {
+      requestId,
+      event: "chat_request",
+      userId,
+      mode,
+      meta: { messageChars: typeof message === "string" ? message.length : 0 },
+    });
+
+    // 2) Ensure OpenAI key exists
+    if (!process.env.OPENAI_API_KEY) {
+      log("error", { requestId, event: "chat_error", userId, mode, error: "OPENAI_API_KEY is not set" });
+
+      await recordChatMetric({
+        nowMs: Date.now(),
+        mode,
+        status: 500,
+        latencyMs: Date.now() - startTime,
+      });
+
+      return NextResponse.json(
+        { ok: false, error: "OPENAI_API_KEY is not set (check env vars)" },
+        { status: 500, headers: responseHeaders(requestId) }
+      );
+    }
+
+    // 3) Validate input
     if (!message || typeof message !== "string") {
-      return NextResponse.json({ ok: false, error: "Missing 'message' (must be a string)" }, { status: 400 });
+      await recordChatMetric({
+        nowMs: Date.now(),
+        mode,
+        status: 400,
+        latencyMs: Date.now() - startTime,
+      });
+
+      return NextResponse.json(
+        { ok: false, error: "Missing 'message' (must be a string)" },
+        { status: 400, headers: responseHeaders(requestId) }
+      );
     }
 
-    // ===========================
-    // 4) Cost/abuse guard: cap input size
-    // ===========================
     if (message.length > 8000) {
-      return NextResponse.json({ ok: false, error: "Message too long (max 8000 characters)" }, { status: 400 });
+      await recordChatMetric({
+        nowMs: Date.now(),
+        mode,
+        status: 400,
+        latencyMs: Date.now() - startTime,
+      });
+
+      return NextResponse.json(
+        { ok: false, error: "Message too long (max 8000 characters)" },
+        { status: 400, headers: responseHeaders(requestId) }
+      );
     }
 
-    // ===========================
-    // 5) RBAC: Review mode is admin-only (server enforced)
-    // ===========================
+    // 4) RBAC: review is admin-only
     if (mode === "review") {
-      const roles = await getRolesFromAccessToken();
-      if (!roles.includes(ADMIN_ROLE)) {
-        return NextResponse.json({ ok: false, mode, error: "Forbidden" }, { status: 403 });
+      const isAdmin = await isAdminFromAccessToken();
+      if (!isAdmin) {
+        log("warn", { requestId, event: "forbidden_review_access", userId, mode });
+
+        await recordChatMetric({
+          nowMs: Date.now(),
+          mode,
+          status: 403,
+          latencyMs: Date.now() - startTime,
+        });
+
+        return NextResponse.json(
+          { ok: false, mode, error: "Forbidden" },
+          { status: 403, headers: responseHeaders(requestId) }
+        );
       }
     }
 
-    // ===========================
-    // 6) Rate limit (Upstash)
-    // ===========================
+    // 5) Rate limit (Upstash)
     const { success, remaining, reset } = await ratelimit.limit(identifier);
 
     const resetSeconds =
@@ -185,6 +208,16 @@ export async function POST(req: Request) {
     };
 
     if (!success) {
+      log("warn", { requestId, event: "rate_limit_exceeded", userId, mode, meta: { resetSeconds } });
+
+      await recordChatMetric({
+        nowMs: Date.now(),
+        mode,
+        status: 429,
+        latencyMs: Date.now() - startTime,
+        rateLimited: true,
+      });
+
       return NextResponse.json(
         {
           ok: false,
@@ -192,13 +225,14 @@ export async function POST(req: Request) {
           details: `Too many requests. Try again in ~${resetSeconds}s.`,
           rate: { ...rateMeta, remaining: 0 },
         },
-        { status: 429, headers: rateHeaders({ ...rateMeta, remaining: 0 }, resetSeconds) }
+        {
+          status: 429,
+          headers: responseHeaders(requestId, { ...rateMeta, remaining: 0 }, resetSeconds),
+        }
       );
     }
 
-    // ===========================
-    // 7) Mode-specific instruction
-    // ===========================
+    // 6) Mode-specific prompt
     const modeInstruction =
       mode === "review"
         ? [
@@ -231,9 +265,7 @@ export async function POST(req: Request) {
             "Prefer unit/API over UI when appropriate.",
           ].join("\n");
 
-    // ===========================
-    // 8) Call the model
-    // ===========================
+    // 7) Call model
     const completion = await client.chat.completions.create({
       model: "gpt-4.1-mini",
       temperature: 0.2,
@@ -245,14 +277,9 @@ export async function POST(req: Request) {
       ],
     });
 
-    // ===========================
-    // 9) Extract reply
-    // ===========================
     const reply = completion.choices[0]?.message?.content ?? "No reply returned";
 
-    // ===========================
-    // 10) REVIEW mode: parse model output as JSON
-    // ===========================
+    // 8) REVIEW: parse JSON
     if (mode === "review") {
       const raw = reply.trim();
       const start = raw.indexOf("{");
@@ -263,34 +290,101 @@ export async function POST(req: Request) {
         const parsed = JSON.parse(jsonText);
 
         if (!isReviewResult(parsed)) {
+          log("warn", {
+            requestId,
+            event: "chat_completed",
+            userId,
+            mode,
+            latencyMs: Date.now() - startTime,
+            meta: { reviewParse: "invalid_shape" },
+          });
+
+          await recordChatMetric({
+            nowMs: Date.now(),
+            mode,
+            status: 200,
+            latencyMs: Date.now() - startTime,
+          });
+
           return NextResponse.json(
             { ok: false, mode, error: "Invalid review JSON shape", raw: reply, rate: rateMeta },
-            { status: 200, headers: rateHeaders(rateMeta) }
+            { status: 200, headers: responseHeaders(requestId, rateMeta ?? undefined) }
           );
         }
 
+        log("info", { requestId, event: "chat_completed", userId, mode, latencyMs: Date.now() - startTime });
+
+        await recordChatMetric({
+          nowMs: Date.now(),
+          mode,
+          status: 200,
+          latencyMs: Date.now() - startTime,
+        });
+
         return NextResponse.json(
           { ok: true, mode, review: parsed, rate: rateMeta },
-          { status: 200, headers: rateHeaders(rateMeta) }
+          { status: 200, headers: responseHeaders(requestId, rateMeta ?? undefined) }
         );
       } catch {
+        log("warn", {
+          requestId,
+          event: "chat_completed",
+          userId,
+          mode,
+          latencyMs: Date.now() - startTime,
+          meta: { reviewParse: "json_parse_failed" },
+        });
+
+        await recordChatMetric({
+          nowMs: Date.now(),
+          mode,
+          status: 200,
+          latencyMs: Date.now() - startTime,
+        });
+
         return NextResponse.json(
           { ok: false, mode, error: "Failed to parse review JSON", raw: reply, rate: rateMeta },
-          { status: 200, headers: rateHeaders(rateMeta) }
+          { status: 200, headers: responseHeaders(requestId, rateMeta ?? undefined) }
         );
       }
     }
 
-    // ===========================
-    // 11) Coach mode returns plain text
-    // ===========================
-    return NextResponse.json({ ok: true, mode, reply, rate: rateMeta }, { status: 200, headers: rateHeaders(rateMeta) });
-  } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : "Unknown server error";
+    // 9) COACH: return text
+    log("info", { requestId, event: "chat_completed", userId, mode, latencyMs: Date.now() - startTime });
+
+    await recordChatMetric({
+      nowMs: Date.now(),
+      mode,
+      status: 200,
+      latencyMs: Date.now() - startTime,
+    });
 
     return NextResponse.json(
-      { ok: false, error: "Server error", details: message, ...(rateMeta ? { rate: rateMeta } : {}) },
-      { status: 500, ...(rateMeta ? { headers: rateHeaders(rateMeta) } : {}) }
+      { ok: true, mode, reply, rate: rateMeta },
+      { status: 200, headers: responseHeaders(requestId, rateMeta ?? undefined) }
+    );
+  } catch (e: unknown) {
+    const errMsg = e instanceof Error ? e.message : "Unknown server error";
+
+    log("error", {
+      requestId,
+      event: "chat_error",
+      userId,
+      mode: modeForLog,
+      error: errMsg,
+      meta: { latencyMs: Date.now() - startTime },
+    });
+
+    await recordChatMetric({
+      nowMs: Date.now(),
+      mode: modeForLog,
+      status: 500,
+      latencyMs: Date.now() - startTime,
+    });
+
+    return NextResponse.json(
+      { ok: false, error: "Server error", details: errMsg, ...(rateMeta ? { rate: rateMeta } : {}) },
+      { status: 500, headers: responseHeaders(requestId, rateMeta ?? undefined) }
     );
   }
 }

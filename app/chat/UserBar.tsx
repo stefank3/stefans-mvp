@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 
 type MeResponse =
-  | { authenticated: true; email: string }
+  | { authenticated: true; email: string; isAdmin: boolean }
   | { authenticated: false };
 
 export default function UserBar() {
@@ -27,18 +27,19 @@ export default function UserBar() {
     };
   }, []);
 
-  // Not loaded yet: render minimal placeholder to avoid layout jump
-  if (!me) {
-    return <div className="text-sm opacity-70">Loading…</div>;
-  }
-
-  if (!me.authenticated) {
-    return null; // or show Login link if you want
-  }
+  if (!me) return <div className="text-sm opacity-70">Loading…</div>;
+  if (!me.authenticated) return null;
 
   return (
     <div className="flex items-center gap-3 text-sm">
       <span className="opacity-80">{me.email}</span>
+
+      {me.isAdmin && (
+        <a href="/admin/metrics" className="rounded-lg border px-3 py-2 hover:bg-white/10">
+          Metrics
+        </a>
+      )}
+
       <a href="/auth/logout" className="rounded-lg border px-3 py-2 hover:bg-white/10">
         Logout
       </a>
