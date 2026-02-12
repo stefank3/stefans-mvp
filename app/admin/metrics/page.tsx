@@ -89,9 +89,10 @@ export default function AdminMetricsPage() {
           style={{
             padding: "8px 12px",
             borderRadius: 10,
-            border: "1px solid #ddd",
+            border: "1px solid #111",
+            background: "#111",
             textDecoration: "none",
-            color: "#111",
+            color: "#fff",
             fontWeight: 800,
           }}
         >
