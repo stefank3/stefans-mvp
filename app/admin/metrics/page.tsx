@@ -72,7 +72,16 @@ export default function AdminMetricsPage() {
   }, [data]);
 
   return (
-    <main style={{ padding: 24, maxWidth: 1100, margin: "0 auto", color: "#111" }}>
+      <main
+        style={{
+          padding: 24,
+          maxWidth: 1100,
+          margin: "0 auto",
+          background: "#f5f6f8", // light background
+          minHeight: "100vh",    // full page coverage
+          color: "#111",
+        }}
+      >
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
         <h1 style={{ fontSize: 22, fontWeight: 900, margin: 0 }}>{title}</h1>
         <a
