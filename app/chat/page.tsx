@@ -631,7 +631,7 @@ Expected: export stops, no file downloaded, status resets`;
 
   return (
     <main style={mainStyle}>
-      <h1 style={{ fontSize: 22, fontWeight: 900, marginBottom: 6 }}>Stefan’s MVP — QE Coach</h1>
+      <h1 style={{ fontSize: 22, fontWeight: 900, marginBottom: 6 }}>AI-Assisted Quality Review & Coaching Platform</h1>
 
       <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
         <Chip>Demo</Chip>
