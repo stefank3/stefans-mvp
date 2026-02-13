@@ -8,6 +8,7 @@ import { auth0 } from "@/lib/auth0";
 import { isAdminFromAccessToken } from "@/lib/auth/rbac";
 import { prisma } from "@/lib/prisma";
 import { log } from "@/lib/logger";
+import type { Prisma } from "@prisma/client";
 
 function headers(requestId: string) {
   return { "X-Request-Id": requestId };
@@ -75,7 +76,7 @@ export async function POST(req: Request) {
       ? `admin_adjust:${body.note.trim().slice(0, 60)}`
       : "admin_adjust";
 
-    const result = await prisma.$transaction(async (tx) => {
+const result = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       // Ensure wallet exists
       const wallet =
         (await tx.creditWallet.findUnique({
