@@ -2,12 +2,13 @@
   "name": "stefans-mvp",
   "version": "0.1.0",
   "private": true,
-  "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
-  },
+ "scripts": {
+  "dev": "next dev",
+  "build": "next build",
+  "start": "next start",
+  "lint": "eslint",
+  "postinstall": "prisma generate"
+},
   "dependencies": {
     "@auth0/nextjs-auth0": "^4.15.0",
     "@prisma/adapter-pg": "^7.4.0",
@@ -20,7 +21,7 @@
     "prisma": "^7.4.0",
     "react": "19.2.3",
     "react-dom": "19.2.3"
-    
+
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
@@ -33,4 +34,6 @@
     "tailwindcss": "^4",
     "typescript": "^5"
   }
+
+  
 }

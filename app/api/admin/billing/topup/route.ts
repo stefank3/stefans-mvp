@@ -8,7 +8,7 @@ import { auth0 } from "@/lib/auth0";
 import { isAdminFromAccessToken } from "@/lib/auth/rbac";
 import { prisma } from "@/lib/prisma";
 import { log } from "@/lib/logger";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@/generated/prisma/client";
 
 function headers(requestId: string) {
   return { "X-Request-Id": requestId };
