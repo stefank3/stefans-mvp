@@ -1,0 +1,112 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+
+model Organization {
+  id        String   @id @default(uuid())
+  name      String
+  createdAt DateTime @default(now())
+
+  members   OrgMember[]
+  plans     Subscription[]
+  wallets   CreditWallet[]
+}
+
+model OrgMember {
+  id             String   @id @default(uuid())
+  organizationId String
+  auth0Sub       String
+  role           String   // "admin" | "member"
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, auth0Sub])
+  @@index([auth0Sub])
+}
+
+model Subscription {
+  id                 String   @id @default(uuid())
+  organizationId      String
+  status             String   // "active" | "past_due" | "canceled"
+  planCode           String   // "office_50"
+  seats              Int
+  monthlyCredits     Int
+  currentPeriodStart DateTime
+  currentPeriodEnd   DateTime
+  createdAt          DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, status])
+}
+
+model CreditWallet {
+  id             String   @id @default(uuid())
+  organizationId String
+  currency       String   // "credits"
+  balance        Int      @default(0)
+  updatedAt      DateTime @updatedAt
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  ledger       CreditLedger[]
+
+  @@unique([organizationId, currency])
+}
+
+model CreditLedger {
+  id        String   @id @default(uuid())
+  walletId  String
+  auth0Sub  String?
+  delta     Int
+  reason    String   // "monthly_topup" | "chat_usage" | "admin_adjust"
+  requestId String?
+  createdAt DateTime @default(now())
+
+  wallet CreditWallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@index([walletId, createdAt])
+  @@index([requestId])
+}
+
+model ChatSession {
+  id        String   @id @default(uuid())
+  auth0Sub  String
+  mode      String   // "coach" | "review"
+  title     String?
+  createdAt DateTime @default(now())
+
+  messages  ChatMessage[]
+
+  @@index([auth0Sub, createdAt])
+}
+
+model ChatMessage {
+  id        String   @id @default(uuid())
+  sessionId String
+  auth0Sub  String
+  role      String   // user|assistant|system
+  content   String
+  tokensIn  Int?
+  tokensOut Int?
+  requestId String?
+  createdAt DateTime @default(now())
+
+  session ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, createdAt])
+  @@index([requestId])
+}

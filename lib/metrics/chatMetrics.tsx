@@ -7,7 +7,7 @@
 import { Redis } from "@upstash/redis";
 
 export type ChatMetricMode = "coach" | "review" | "unknown";
-export type ChatMetricStatus = 200 | 400 | 401 | 403 | 429 | 500;
+export type ChatMetricStatus = 200 | 400 | 401 | 402 | 403 | 429 | 500;
 
 const redis = Redis.fromEnv();
 

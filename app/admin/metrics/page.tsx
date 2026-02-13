@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import BillingPanel from "./BillingPanel";
+
 
 type MetricsResponse =
   | {
@@ -36,6 +38,7 @@ function formatBucket(tsSeconds: number) {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+<BillingPanel/>
 export default function AdminMetricsPage() {
   const [data, setData] = useState<MetricsResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -98,6 +101,7 @@ export default function AdminMetricsPage() {
         >
           Back to chat
         </a>
+        <BillingPanel/>
       </div>
 
       <div style={{ marginTop: 12, color: "#444", fontSize: 13 }}>

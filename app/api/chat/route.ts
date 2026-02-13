@@ -1,13 +1,4 @@
 // app/api/chat/route.ts
-// ===========================
-// ✅ /api/chat (production + observability + metrics)
-// - Auth0 session required (API not public)
-// - Upstash per-user rate limiting
-// - RBAC: Review mode is admin-only (roles claim in Access Token)
-// - Observability: requestId correlation + latency + structured logs
-// - Metrics: Redis bucket counters (5-min buckets)
-// ===========================
-
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -24,6 +15,10 @@ import { QA_SYSTEM_PROMPT } from "@/lib/framework/systemPrompt";
 import { isReviewResult } from "@/lib/framework/reviewSchema";
 import { isAdminFromAccessToken } from "@/lib/auth/rbac";
 import { recordChatMetric, type ChatMetricMode } from "@/lib/metrics/chatMetrics";
+
+import { prisma } from "@/lib/prisma";
+import { ensureOrgForUser } from "@/lib/billing/ensureOrgForUser";
+import { chargeCredits, InsufficientCreditsError } from "@/lib/billing/chargeCredits";
 
 const redis = Redis.fromEnv();
 
@@ -50,10 +45,13 @@ type RateMeta = {
   resetSeconds: number;
 };
 
-/**
- * Fallback identifier (only used if Auth0 `sub` is missing).
- * Should be rare because we require session.
- */
+type ChatBody = {
+  message?: string;
+  mode?: Mode;
+  sessionId?: string; // NEW: reuse session
+  title?: string;     // optional (UI can set)
+};
+
 function getIpIdentifier(req: Request): string {
   const xff = req.headers.get("x-forwarded-for");
   if (xff) return `ip:${xff.split(",")[0].trim()}`;
@@ -64,11 +62,6 @@ function getIpIdentifier(req: Request): string {
   return "ip:unknown";
 }
 
-/**
- * Standard response headers:
- * - Always includes X-Request-Id for correlation
- * - Optionally includes rate-limit headers
- */
 function responseHeaders(requestId: string, meta?: RateMeta, retryAfterSec?: number) {
   const headers: Record<string, string> = { "X-Request-Id": requestId };
 
@@ -81,6 +74,12 @@ function responseHeaders(requestId: string, meta?: RateMeta, retryAfterSec?: num
   if (retryAfterSec && retryAfterSec > 0) headers["Retry-After"] = String(retryAfterSec);
 
   return headers;
+}
+
+// Simple credit model: 1 credit per 1000 tokens (rounded up)
+function tokensToCredits(totalTokens: number) {
+  if (!Number.isFinite(totalTokens) || totalTokens <= 0) return 0;
+  return Math.max(1, Math.ceil(totalTokens / 1000));
 }
 
 export async function POST(req: Request) {
@@ -116,7 +115,7 @@ export async function POST(req: Request) {
     const identifier = userId !== "unknown" ? `user:${userId}` : getIpIdentifier(req);
 
     // 1) Parse request
-    const body = (await req.json()) as { message?: string; mode?: Mode };
+    const body = (await req.json()) as ChatBody;
     const message = body?.message;
     const mode: Mode = body?.mode === "review" ? "review" : "coach";
     modeForLog = mode;
@@ -195,6 +194,34 @@ export async function POST(req: Request) {
       }
     }
 
+    // 4.5) Ensure org + wallet exist; optionally enforce "must have credits to chat"
+    const orgState = await ensureOrgForUser({
+      auth0Sub: userId,
+      name: (session.user.name as string | undefined) ?? null,
+      email: (session.user.email as string | undefined) ?? null,
+    });
+
+    if (!orgState.wallet || orgState.wallet.balance <= 0) {
+      // MVP behavior: block if no credits.
+      // Later: allow free tier or admin topup.
+      await recordChatMetric({
+        nowMs: Date.now(),
+        mode,
+        status: 402,
+        latencyMs: Date.now() - startTime,
+      });
+
+      return NextResponse.json(
+        {
+          ok: false,
+          mode,
+          error: "Insufficient credits",
+          creditsRemaining: orgState.wallet?.balance ?? 0,
+        },
+        { status: 402, headers: responseHeaders(requestId) }
+      );
+    }
+
     // 5) Rate limit (Upstash)
     const { success, remaining, reset } = await ratelimit.limit(identifier);
 
@@ -231,6 +258,36 @@ export async function POST(req: Request) {
         }
       );
     }
+
+    // 5.5) Create or reuse ChatSession
+    let sessionId = body?.sessionId;
+
+    if (sessionId) {
+      const existing = await prisma.chatSession.findFirst({
+        where: { id: sessionId, auth0Sub: userId },
+        select: { id: true },
+      });
+      if (!existing) sessionId = undefined;
+    }
+
+    if (!sessionId) {
+      const created = await prisma.chatSession.create({
+        data: { auth0Sub: userId, mode, title: body?.title ?? null },
+        select: { id: true },
+      });
+      sessionId = created.id;
+    }
+
+    // Store user message
+    await prisma.chatMessage.create({
+      data: {
+        sessionId,
+        auth0Sub: userId,
+        role: "user",
+        content: message,
+        requestId,
+      },
+    });
 
     // 6) Mode-specific prompt
     const modeInstruction =
@@ -279,6 +336,59 @@ export async function POST(req: Request) {
 
     const reply = completion.choices[0]?.message?.content ?? "No reply returned";
 
+    // Usage → credits
+    const promptTokens = completion.usage?.prompt_tokens ?? 0;
+    const completionTokens = completion.usage?.completion_tokens ?? 0;
+    const totalTokens = completion.usage?.total_tokens ?? promptTokens + completionTokens;
+    const creditsCharged = tokensToCredits(totalTokens);
+
+    // Store assistant message (raw text; review JSON is stored as text too)
+    await prisma.chatMessage.create({
+      data: {
+        sessionId,
+        auth0Sub: userId,
+        role: "assistant",
+        content: reply,
+        tokensIn: promptTokens,
+        tokensOut: completionTokens,
+        requestId,
+      },
+    });
+
+    // Charge credits (transactional)
+    let creditsRemaining: number | null = null;
+    try {
+      creditsRemaining = await chargeCredits({
+        auth0Sub: userId,
+        credits: creditsCharged,
+        requestId,
+      });
+    } catch (e) {
+      if (e instanceof InsufficientCreditsError) {
+        await recordChatMetric({
+          nowMs: Date.now(),
+          mode,
+          status: 402,
+          latencyMs: Date.now() - startTime,
+        });
+
+        return NextResponse.json(
+          {
+            ok: false,
+            mode,
+            error: "Insufficient credits",
+            sessionId,
+            creditsCharged,
+            creditsRemaining: orgState.wallet?.balance ?? 0,
+            usage: { promptTokens, completionTokens, totalTokens },
+            rate: rateMeta,
+          },
+          { status: 402, headers: responseHeaders(requestId, rateMeta ?? undefined) }
+        );
+      }
+      throw e;
+    }
+
     // 8) REVIEW: parse JSON
     if (mode === "review") {
       const raw = reply.trim();
@@ -307,7 +417,17 @@ export async function POST(req: Request) {
           });
 
           return NextResponse.json(
-            { ok: false, mode, error: "Invalid review JSON shape", raw: reply, rate: rateMeta },
+            {
+              ok: false,
+              mode,
+              error: "Invalid review JSON shape",
+              raw: reply,
+              sessionId,
+              creditsCharged,
+              creditsRemaining,
+              usage: { promptTokens, completionTokens, totalTokens },
+              rate: rateMeta,
+            },
             { status: 200, headers: responseHeaders(requestId, rateMeta ?? undefined) }
           );
         }
@@ -322,7 +442,16 @@ export async function POST(req: Request) {
         });
 
         return NextResponse.json(
-          { ok: true, mode, review: parsed, rate: rateMeta },
+          {
+            ok: true,
+            mode,
+            review: parsed,
+            sessionId,
+            creditsCharged,
+            creditsRemaining,
+            usage: { promptTokens, completionTokens, totalTokens },
+            rate: rateMeta,
+          },
           { status: 200, headers: responseHeaders(requestId, rateMeta ?? undefined) }
         );
       } catch {
@@ -343,7 +472,17 @@ export async function POST(req: Request) {
         });
 
         return NextResponse.json(
-          { ok: false, mode, error: "Failed to parse review JSON", raw: reply, rate: rateMeta },
+          {
+            ok: false,
+            mode,
+            error: "Failed to parse review JSON",
+            raw: reply,
+            sessionId,
+            creditsCharged,
+            creditsRemaining,
+            usage: { promptTokens, completionTokens, totalTokens },
+            rate: rateMeta,
+          },
           { status: 200, headers: responseHeaders(requestId, rateMeta ?? undefined) }
         );
       }
@@ -360,7 +499,16 @@ export async function POST(req: Request) {
     });
 
     return NextResponse.json(
-      { ok: true, mode, reply, rate: rateMeta },
+      {
+        ok: true,
+        mode,
+        reply,
+        sessionId,
+        creditsCharged,
+        creditsRemaining,
+        usage: { promptTokens, completionTokens, totalTokens },
+        rate: rateMeta,
+      },
       { status: 200, headers: responseHeaders(requestId, rateMeta ?? undefined) }
     );
   } catch (e: unknown) {
