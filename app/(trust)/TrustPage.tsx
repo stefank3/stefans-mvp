@@ -110,32 +110,6 @@ export default function TrustPage({
           </p>
         </header>
 
-        <section
-          aria-label="Draft notice"
-          style={{
-            border: "1px solid #bfdbfe",
-            borderLeft: "4px solid #2563eb",
-            borderRadius: 8,
-            background: "#eff6ff",
-            padding: 18,
-            marginBottom: 18,
-          }}
-        >
-          <p
-            style={{
-              margin: 0,
-              color: "#1e3a8a",
-              fontSize: 14,
-              lineHeight: 1.65,
-              fontWeight: 750,
-            }}
-          >
-            Draft placeholder for commercial readiness. This page is not final
-            legal advice, not a completed policy, and should be reviewed by a
-            human legal or business owner before public commercial launch.
-          </p>
-        </section>
-
         <div style={{ display: "grid", gap: 14 }}>
           {sections.map((section) => (
             <article

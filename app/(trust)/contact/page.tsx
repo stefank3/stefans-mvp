@@ -11,20 +11,18 @@ export default function ContactPage() {
     <TrustPage
       eyebrow="Contact"
       title="Contact Release Signal"
-      intro="Basic contact information for Release Signal commercial readiness."
+      intro="Get in touch with Release Signal for product, account, or policy questions."
       sections={[
         {
-          title: "Product and operator",
+          title: "How to contact us",
           body: [
-            "Release Signal is a QA intelligence and release-readiness product built by Stefan Kajchevski / RSF Labs.",
-            "This contact page is a placeholder for commercial launch preparation and should be reviewed before public use.",
+            "Email contact@releasesignal.io for product or support questions, beta access or account questions, and questions about our privacy notice or terms.",
           ],
         },
         {
-          title: "Contact channel",
+          title: "About Release Signal",
           body: [
-            "A public support or sales contact address has not been finalized in this repository.",
-            "Until a reviewed contact channel is approved, users should use the contact path provided directly by the Release Signal operator.",
+            "Release Signal provides AI-assisted QA, test-design, and release-readiness functionality.",
           ],
         },
       ]}

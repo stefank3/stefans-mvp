@@ -10,28 +10,26 @@ export default function RefundCancellationPage() {
   return (
     <TrustPage
       eyebrow="Refund / Cancellation"
-      title="Refund and Cancellation Placeholder"
-      intro="A conservative placeholder for future commercial billing policy."
+      title="Refund and Cancellation Policy"
+      intro="This policy explains how refunds and cancellation apply to the current Release Signal beta."
       sections={[
         {
-          title: "Current payment status",
+          title: "Current beta access",
           body: [
-            "No payment provider integration is described by this page.",
-            "This placeholder does not define invoice, card, bank-transfer, checkout, renewal, or payment-provider behavior.",
+            "Current Release Signal beta access is non-paying. There is no paid subscription charge to refund for ordinary beta access.",
+            "Normal paid-subscription cancellation is not part of the current beta lifecycle. The end, limitation, or loss of beta access is not a billing cancellation.",
           ],
         },
         {
-          title: "Future cancellation policy",
+          title: "Future paid services",
           body: [
-            "Cancellation and renewal behavior should be defined only after the commercial billing model and payment provider, if any, are approved.",
-            "Any future policy should explain how users can cancel, what happens to access after cancellation, and how unused time or credits are handled.",
+            "If Release Signal introduces paid subscriptions, the applicable billing, renewal, cancellation, and refund terms will be provided as part of the relevant paid offering.",
           ],
         },
         {
-          title: "Future refund policy",
+          title: "Questions",
           body: [
-            "Refund eligibility, review windows, exclusions, and contact paths are not finalized in this repository.",
-            "A human-reviewed refund policy should be added before public paid commercial launch.",
+            "For questions about this policy or beta access, contact contact@releasesignal.io.",
           ],
         },
       ]}
