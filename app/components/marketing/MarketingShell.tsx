@@ -4,6 +4,7 @@ import { FeatureSection } from "./FeatureSection";
 import { FinalCtaSection } from "./FinalCtaSection";
 import { HeroSection } from "./HeroSection";
 import { ProblemSection } from "./ProblemSection";
+import { PricingSection } from "./PricingSection";
 import { PublicFooter } from "./PublicFooter";
 import { PublicHeader } from "./PublicHeader";
 import { WorkflowSection } from "./WorkflowSection";
@@ -19,6 +20,7 @@ export function MarketingShell() {
         <WorkflowSection />
         <FeatureSection />
         <DifferentiatorSection />
+        <PricingSection />
         <FaqSection />
         <FinalCtaSection />
       </main>
