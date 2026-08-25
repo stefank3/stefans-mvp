@@ -1,16 +1,16 @@
 import { PRODUCT_PACKAGE_NAMES } from "@/lib/product/packageLabels";
 
 export const betaTrialHref =
-  "mailto:contact@releasesignal.io?subject=Release%20Signal%2015-day%20beta%20access%20request";
+  "/auth/login?screen_hint=signup&returnTo=%2Fchat";
 
 export const contactEmail = "contact@releasesignal.io";
 
 export const signInHref = "/auth/login?returnTo=%2Fchat";
 
-export const primaryCtaLabel = "Request 15-day beta access";
+export const primaryCtaLabel = "Start Trial";
 
 export const betaMicrocopy =
-  "15-day non-paying beta | 100 starting usage credits | No payment required | Request access through contact@releasesignal.io";
+  "15-day non-paying beta | 100 starting usage credits | No payment required";
 
 export const guardrailCopy =
   "Release Signal provides QA assistance and release-readiness support, but it does not replace human QA judgment or final release approval.";

@@ -16,7 +16,7 @@ export function FinalCtaSection() {
             really is.
           </h2>
           <p className={styles.contactLine}>
-            Request access through{" "}
+            For support or questions, contact{" "}
             <a href={`mailto:${contactEmail}`}>{contactEmail}</a>.
           </p>
         </div>
