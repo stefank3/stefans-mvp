@@ -1,14 +1,16 @@
+import { PRODUCT_PACKAGE_NAMES } from "@/lib/product/packageLabels";
+
 export const betaTrialHref =
-  "mailto:contact@releasesignal.io?subject=Release%20Signal%2010-day%20beta%20trial%20request";
+  "mailto:contact@releasesignal.io?subject=Release%20Signal%2015-day%20beta%20access%20request";
 
 export const contactEmail = "contact@releasesignal.io";
 
 export const signInHref = "/auth/login?returnTo=%2Fchat";
 
-export const primaryCtaLabel = "Start the 10-day beta trial";
+export const primaryCtaLabel = "Request 15-day beta access";
 
 export const betaMicrocopy =
-  "Controlled beta | First come, first served | Request access through contact@releasesignal.io";
+  "15-day non-paying beta | 100 starting usage credits | No payment required | Request access through contact@releasesignal.io";
 
 export const guardrailCopy =
   "Release Signal provides QA assistance and release-readiness support, but it does not replace human QA judgment or final release approval.";
@@ -16,6 +18,7 @@ export const guardrailCopy =
 export const navLinks = [
   { href: "#how-it-works", label: "How it works" },
   { href: "#features", label: "Features" },
+  { href: "#pricing", label: "Pricing" },
   { href: "#faq", label: "FAQ" },
   { href: `mailto:${contactEmail}`, label: "Contact" },
 ];
@@ -105,6 +108,22 @@ export const differentiators = [
   "During beta, avoid uploading secrets or sensitive production/customer data unless terms explicitly allow it.",
 ];
 
+export const pricingOptions = {
+  beta: {
+    status: "Current beta",
+    name: "Beta access",
+    price: "No payment required",
+    details: ["15 days", "100 starting usage credits", "Non-paying beta"],
+  },
+  standard: {
+    status: "Future paid plan",
+    name: PRODUCT_PACKAGE_NAMES.standard,
+    price: "€25/month",
+    description:
+      "Paid checkout and subscriptions are not currently active.",
+  },
+} as const;
+
 export const faqs = [
   {
     question: "Is Release Signal just an AI test generator?",
@@ -117,9 +136,9 @@ export const faqs = [
       "It is a structured signal derived from the current requirement, test suite, review result, and execution evidence. It supports the release conversation; it does not approve a release by itself.",
   },
   {
-    question: "What do I get in the 10-day beta trial?",
+    question: "What do I get with beta access?",
     answer:
-      "Accepted beta users can try the Release Signal workflow for requirement refinement, structured test-suite generation, review, improvement, export, execution evidence, and readiness support.",
+      "Accepted beta users receive 15-day beta access with 100 starting usage credits. No payment is required.",
   },
   {
     question: "Does Release Signal replace QA approval?",
