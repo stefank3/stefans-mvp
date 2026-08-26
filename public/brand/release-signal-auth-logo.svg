@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 48 48" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">Release Signal</title>
+  <desc id="desc">Open cycle ring with a single pulse spike and ship node</desc>
+  <defs>
+    <linearGradient id="rsLoop" x1="8" y1="40" x2="40" y2="8" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2563EB"/>
+      <stop offset="1" stop-color="#2DD4BF"/>
+    </linearGradient>
+  </defs>
+  <path d="M28.14 8.55A16 16 0 1 0 38.5 17.24"
+        stroke="url(#rsLoop)"
+        stroke-width="4.6"
+        stroke-linecap="round"/>
+  <path d="M14 26H18L21 31L26 17L29 26H34"
+        stroke="url(#rsLoop)"
+        stroke-width="3.8"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
+  <circle cx="38.5" cy="17.24" r="3.6" fill="#5EEAD4"/>
+</svg>
