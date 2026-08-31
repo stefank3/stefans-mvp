@@ -18,6 +18,7 @@ export async function middleware(request: NextRequest) {
     pathname === "/trial-terms" ||
     pathname === "/refund-cancellation" ||
     pathname.startsWith("/auth") ||
+    pathname.startsWith("/brand/") ||
     pathname.startsWith("/_next") ||
     pathname === "/favicon.ico";
 
