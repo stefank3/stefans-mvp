@@ -16,11 +16,18 @@
 // - treat refine_requirement as coach/non-cases execution without requiring message
 
 import { auth0 } from "@/lib/auth0";
+import { SIGNUP_INTENT_COOKIE_NAME } from "@/lib/auth/signupIntent";
 import { log } from "@/lib/logger";
+import { cookies } from "next/headers";
 
 import { isAdminFromAccessToken } from "@/lib/auth/rbac";
 import { evaluateAccountAccess } from "@/lib/billing/accountAccess";
-import { ensureOrgForUser } from "@/lib/billing/ensureOrgForUser";
+import type { EnsureOrgState } from "@/lib/billing/ensureOrgForUser";
+import {
+  AccountNotProvisionedError,
+  AccountProvisioningUnavailableError,
+  resolveOrgForUser,
+} from "@/lib/billing/resolveOrgForUser";
 import { chatRatelimit, CHAT_RATE_LIMIT } from "@/lib/ratelimit";
 
 import {
@@ -33,6 +40,7 @@ import {
 import { isWeakInput } from "@/lib/chat/inputQuality";
 import {
   buildAccountAccessRequiredResponse,
+  buildAccountProvisioningErrorResponse,
   buildForbiddenResponse,
   buildInputTooLargeResponse,
   buildInvalidJsonBodyResponse,
@@ -105,7 +113,7 @@ type BillingPrecheckResult =
   | {
       ok: true;
       orgId: string | undefined;
-      orgState: Awaited<ReturnType<typeof ensureOrgForUser>>;
+      orgState: EnsureOrgState;
     };
 
 type RateLimitResult =
@@ -355,12 +363,53 @@ export async function ensureBillingPreconditions(args: {
   recordChatMetric: MetricRecorder;
 }): Promise<BillingPrecheckResult> {
   const isAdmin = await isAdminFromAccessToken();
-  const orgState = await ensureOrgForUser({
-    auth0Sub: args.auth0Sub,
-    name: (args.user.name as string | undefined) ?? null,
-    email: (args.user.email as string | undefined) ?? null,
-    isAuth0Admin: isAdmin,
-  });
+  const cookieStore = await cookies();
+  const signupIntentNonce = cookieStore.get(SIGNUP_INTENT_COOKIE_NAME)?.value;
+  let resolvedAccount;
+
+  try {
+    resolvedAccount = await resolveOrgForUser({
+      auth0Sub: args.auth0Sub,
+      name: (args.user.name as string | undefined) ?? null,
+      email: (args.user.email as string | undefined) ?? null,
+      isAuth0Admin: isAdmin,
+      signupIntentNonce,
+    });
+  } catch (error) {
+    const reason =
+      error instanceof AccountNotProvisionedError
+        ? "account_not_provisioned"
+        : error instanceof AccountProvisioningUnavailableError
+          ? "account_provisioning_unavailable"
+          : null;
+
+    if (!reason) throw error;
+
+    if (reason === "account_not_provisioned") {
+      cookieStore.delete(SIGNUP_INTENT_COOKIE_NAME);
+      await args.recordChatMetric({
+        nowMs: Date.now(),
+        mode: args.clientMode,
+        status: 403,
+        latencyMs: Date.now() - args.startTime,
+      });
+    }
+
+    return {
+      ok: false,
+      response: buildAccountProvisioningErrorResponse({
+        requestId: args.requestId,
+        clientMode: args.clientMode,
+        reason,
+      }),
+    };
+  }
+
+  if (resolvedAccount.clearSignupIntentCookie) {
+    cookieStore.delete(SIGNUP_INTENT_COOKIE_NAME);
+  }
+
+  const orgState = resolvedAccount.orgState;
 
   const orgId =
     typeof orgState.organizationId === "string"

@@ -1,7 +1,7 @@
 import { PRODUCT_PACKAGE_NAMES } from "@/lib/product/packageLabels";
 
 export const betaTrialHref =
-  "/auth/login?screen_hint=signup&returnTo=%2Fchat";
+  "/auth/start-trial";
 
 export const contactEmail = "contact@releasesignal.io";
 

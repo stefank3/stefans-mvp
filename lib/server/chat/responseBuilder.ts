@@ -102,6 +102,27 @@ export function buildForbiddenResponse(args: {
   );
 }
 
+export function buildAccountProvisioningErrorResponse(args: {
+  requestId: string;
+  clientMode: ClientMode;
+  reason: "account_not_provisioned" | "account_provisioning_unavailable";
+}) {
+  const unavailable = args.reason === "account_provisioning_unavailable";
+
+  return NextResponse.json(
+    {
+      ok: false,
+      mode: args.clientMode,
+      error: unavailable ? "Account provisioning unavailable" : "Account not provisioned",
+      reason: args.reason,
+    },
+    {
+      status: unavailable ? 503 : 403,
+      headers: responseHeaders(args.requestId),
+    }
+  );
+}
+
 export function buildAccountAccessRequiredResponse(args: {
   requestId: string;
   clientMode: ClientMode;

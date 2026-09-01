@@ -9,9 +9,15 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
 import { auth0 } from "@/lib/auth0";
+import { SIGNUP_INTENT_COOKIE_NAME } from "@/lib/auth/signupIntent";
 import { isAdminFromAccessToken } from "@/lib/auth/rbac";
-import { ensureOrgForUser } from "@/lib/billing/ensureOrgForUser";
+import {
+  AccountNotProvisionedError,
+  AccountProvisioningUnavailableError,
+  resolveOrgForUser,
+} from "@/lib/billing/resolveOrgForUser";
 import { prisma } from "@/lib/prisma";
 import { enforceRouteRateLimit } from "@/lib/server/rateLimit";
 import { buildInternalServerErrorResponse, getRequestId } from "@/lib/server/apiErrorResponse";
@@ -33,7 +39,11 @@ type MeResponse =
       currentPeriodStart: string | null;
       currentPeriodEnd: string | null;
     }
-  | { authenticated: false };
+  | { authenticated: false }
+  | {
+      authenticated: true;
+      error: "account_not_provisioned" | "account_provisioning_unavailable";
+    };
 
 function toIsoString(value: Date | null | undefined) {
   return value ? value.toISOString() : null;
@@ -79,7 +89,42 @@ export async function GET(req: Request) {
     // Auth0 Next.js SDK v4: namespaced claims may not be present in session.user
     // so we use the Access Token for role checks.
     const isAdmin = await isAdminFromAccessToken();
-    const orgState = await ensureOrgForUser({ auth0Sub, name, email, isAuth0Admin: isAdmin });
+    const cookieStore = await cookies();
+    const signupIntentNonce = cookieStore.get(SIGNUP_INTENT_COOKIE_NAME)?.value;
+    let resolvedAccount;
+
+    try {
+      resolvedAccount = await resolveOrgForUser({
+        auth0Sub,
+        name,
+        email,
+        isAuth0Admin: isAdmin,
+        signupIntentNonce,
+      });
+    } catch (error) {
+      if (error instanceof AccountNotProvisionedError) {
+        cookieStore.delete(SIGNUP_INTENT_COOKIE_NAME);
+        return NextResponse.json<MeResponse>(
+          { authenticated: true, error: "account_not_provisioned" },
+          { status: 403 }
+        );
+      }
+
+      if (error instanceof AccountProvisioningUnavailableError) {
+        return NextResponse.json<MeResponse>(
+          { authenticated: true, error: "account_provisioning_unavailable" },
+          { status: 503 }
+        );
+      }
+
+      throw error;
+    }
+
+    if (resolvedAccount.clearSignupIntentCookie) {
+      cookieStore.delete(SIGNUP_INTENT_COOKIE_NAME);
+    }
+
+    const orgState = resolvedAccount.orgState;
     const subscription = await prisma.subscription.findFirst({
       where: { organizationId: orgState.organizationId },
       orderBy: { createdAt: "desc" },
